@@ -17,7 +17,8 @@ coverage.*
 /tmp/
 *.wal
 *.sst
-MANIFEST*
+# Engine manifest files (e.g. MANIFEST-000001). Must not match the manifest/ package dir.
+MANIFEST-*
 
 # Editors / OS
 .vscode/

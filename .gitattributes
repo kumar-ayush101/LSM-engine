@@ -1,0 +1,2 @@
+# Keep LF everywhere so gofmt is happy on Windows and Linux CI alike.
+* text=auto eol=lf
