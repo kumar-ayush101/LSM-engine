@@ -1,0 +1,27 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+
+# Test / coverage artifacts
+*.test
+*.out
+coverage.*
+*.prof
+
+# Engine data directories created by tests, benchmarks, or local runs
+/data/
+/tmp/
+*.wal
+*.sst
+MANIFEST*
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
