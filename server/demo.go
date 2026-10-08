@@ -21,10 +21,11 @@ const DemoPrefix = "demo/"
 // can try the engine without the admin token.
 //
 // Protection layers, from hardest to softest:
-//   - MaxTotalBytes: a hard cap on memory all demo writes (including
-//     deletes, which are tombstones) may consume. Once reached, demo writes
-//     get 507 until the process restarts. The memtable never frees memory
-//     before SSTable flush (W3), so a monotonic counter is accurate.
+//   - MaxTotalBytes: a hard cap on the bytes all demo writes (including
+//     deletes, which are tombstones) may add. Once reached, demo writes get
+//     507 until the process restarts. The counter is monotonic, so it is an
+//     upper bound on what visitors added to the WAL and SSTables (compaction
+//     may later reclaim some of it).
 //   - GlobalPerMinute: total demo request rate across all clients.
 //   - PerIPPerMinute: per-client fairness. Depends on TrustProxy being set
 //     correctly for the deployment (see clientIP).

@@ -6,6 +6,9 @@
 //	GET    /v1/kv/{key}                        -> 200 body = value, or 404
 //	DELETE /v1/kv/{key}                        -> 204 (also for missing keys)
 //	GET    /v1/stats                           -> 200 JSON
+//	GET    /v1/scan?start=&end=&prefix=&limit= -> 200 JSON range scan
+//	POST   /v1/admin/flush                     -> flush memtable to an SSTable
+//	POST   /v1/admin/compact                   -> merge all SSTables into one
 //	GET    /healthz                            -> 200 "ok" (no auth, for load balancers)
 //	GET    /                                   -> public landing page (no auth;
 //	                                              aggregate stats only, never keys)
@@ -15,6 +18,7 @@
 //
 //	GET|PUT|DELETE /v1/demo/kv/{key}
 //	GET            /v1/demo/stats
+//	GET            /v1/demo/scan   (within demo/ only, max 50 pairs)
 //
 // Keys are the rest of the path after /v1/kv/, percent-decoded, so they may
 // contain slashes. Values are raw bytes (application/octet-stream).
@@ -102,12 +106,16 @@ func New(d *db.DB, cfg Config) (http.Handler, error) {
 	mux.Handle("PUT /v1/kv/{key...}", h.auth(h.put))
 	mux.Handle("DELETE /v1/kv/{key...}", h.auth(h.del))
 	mux.Handle("GET /v1/stats", h.auth(h.stats))
+	mux.Handle("GET /v1/scan", h.auth(h.ownerScan))
+	mux.Handle("POST /v1/admin/flush", h.auth(h.flush))
+	mux.Handle("POST /v1/admin/compact", h.auth(h.compact))
 	if cfg.Demo.Enabled {
 		h.demo = newDemo(cfg.Demo)
 		mux.Handle("GET /v1/demo/kv/{key...}", h.demoLimit(h.demoGet))
 		mux.Handle("PUT /v1/demo/kv/{key...}", h.demoLimit(h.demoPut))
 		mux.Handle("DELETE /v1/demo/kv/{key...}", h.demoLimit(h.demoDelete))
 		mux.Handle("GET /v1/demo/stats", h.demoLimit(h.demoStats))
+		mux.Handle("GET /v1/demo/scan", h.demoLimit(h.demoScan))
 	}
 	return h.logRequests(mux), nil
 }

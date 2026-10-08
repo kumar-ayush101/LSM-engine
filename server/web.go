@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
+	"math"
 	"net/http"
 	"time"
 )
@@ -53,6 +54,10 @@ type indexData struct {
 	LastSeq       uint64
 	SyncPolicy    string
 	Uptime        string
+	Tables        int
+	TableBytes    int64
+	Compactions   int64
+	Flushes       int64
 
 	DemoEnabled   bool
 	DemoPrefix    string
@@ -74,6 +79,10 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		LastSeq:       st.LastSeq,
 		SyncPolicy:    st.SyncPolicy,
 		Uptime:        time.Since(h.started).Round(time.Second).String(),
+		Tables:        st.Tables,
+		TableBytes:    st.TableBytes,
+		Compactions:   st.Compactions,
+		Flushes:       st.Flushes,
 	}
 	if st.MaxMemtable > 0 {
 		data.MemPercent = int(st.MemtableBytes * 100 / st.MaxMemtable)
@@ -98,16 +107,22 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 // values), so the page can refresh them live. It is not rate limited: like
 // the landing page it only reads a few counters.
 type PublicStats struct {
-	Entries        int    `json:"entries"`
-	LastSeq        uint64 `json:"last_seq"`
-	WALBytes       int64  `json:"wal_bytes"`
-	MemtableBytes  int64  `json:"memtable_bytes"`
-	MemtableLimit  int64  `json:"memtable_limit"`
-	SyncPolicy     string `json:"sync_policy"`
-	UptimeSeconds  int64  `json:"uptime_seconds"`
-	DemoEnabled    bool   `json:"demo_enabled"`
-	DemoBytesUsed  int64  `json:"demo_bytes_used,omitempty"`
-	DemoBytesLimit int64  `json:"demo_bytes_limit,omitempty"`
+	Entries            int     `json:"entries"`
+	LastSeq            uint64  `json:"last_seq"`
+	WALBytes           int64   `json:"wal_bytes"`
+	MemtableBytes      int64   `json:"memtable_bytes"`
+	MemtableLimit      int64   `json:"memtable_limit"`
+	SyncPolicy         string  `json:"sync_policy"`
+	UptimeSeconds      int64   `json:"uptime_seconds"`
+	Tables             int     `json:"tables"`
+	TableBytes         int64   `json:"table_bytes"`
+	Flushes            int64   `json:"flushes"`
+	Compactions        int64   `json:"compactions"`
+	WriteAmplification float64 `json:"write_amplification"`
+	BloomFilterSkips   int64   `json:"bloom_filter_skips"`
+	DemoEnabled        bool    `json:"demo_enabled"`
+	DemoBytesUsed      int64   `json:"demo_bytes_used,omitempty"`
+	DemoBytesLimit     int64   `json:"demo_bytes_limit,omitempty"`
 }
 
 func (h *handler) publicStats(w http.ResponseWriter, r *http.Request) {
@@ -120,6 +135,13 @@ func (h *handler) publicStats(w http.ResponseWriter, r *http.Request) {
 		MemtableLimit: st.MaxMemtable,
 		SyncPolicy:    st.SyncPolicy,
 		UptimeSeconds: int64(time.Since(h.started).Seconds()),
+
+		Tables:             st.Tables,
+		TableBytes:         st.TableBytes,
+		Flushes:            st.Flushes,
+		Compactions:        st.Compactions,
+		WriteAmplification: math.Round(st.WriteAmplification*100) / 100,
+		BloomFilterSkips:   st.BloomFilterSkips,
 	}
 	if h.demo != nil {
 		ps.DemoEnabled = true
