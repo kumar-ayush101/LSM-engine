@@ -179,6 +179,28 @@ run against a build that skipped every 50th record during replay, and it failed 
 | `GET` | `/healthz` | `200 ok`, no auth (for load balancers) |
 | `GET` | `/` | Public landing page: project overview, live aggregate stats, API reference, and a "Try it" panel (needs the token). Never shows keys or values. |
 
+#### Public demo sandbox (`LSM_DEMO=on`)
+
+Optional, off by default. Lets visitors try the engine without the token:
+
+| Method | Path | Result |
+|---|---|---|
+| `PUT` / `GET` / `DELETE` | `/v1/demo/kv/{key}` | same as the owner API, no auth |
+| `GET` | `/v1/demo/stats` | aggregate counters plus demo budget used |
+
+Every demo key is stored as `demo/<key>`, so visitors can never read or change other keys; the
+`demo/` prefix is reserved. Abuse is bounded in layers:
+
+- Hard memory budget for all demo writes (8 MiB; tombstones count too). When it is used up,
+  demo writes get `507` until restart; the owner API is unaffected.
+- Global rate limit (600 requests/min) and a per-client token bucket (30/min, burst 10), with
+  `429` and `Retry-After`. The limiter table is bounded and fails closed under an address flood.
+- Small keys (64 B) and values (1 KiB).
+- Values are served with `nosniff` and a `sandbox` CSP, so stored HTML can never run as a page.
+
+Behind a reverse proxy (Render, Fly), set `LSM_TRUST_PROXY=on` so the per-client limit uses the
+rightmost `X-Forwarded-For` entry (the address the proxy saw, which the client cannot forge).
+
 Keys are the URL path after `/v1/kv/` (percent-decoded, may contain `/`); values are raw bytes.
 
 - Auth: every `/v1` route requires `Authorization: Bearer <LSM_AUTH_TOKEN>`. Tokens are compared in
@@ -208,6 +230,8 @@ before exposing it to the internet; the bearer token is sent with every request.
 | `LSM_SYNC` | `-sync` | `group` (`always`, `periodic`) |
 | `LSM_MAX_MEMTABLE_MB` | `-max-memtable-mb` | `256` |
 | `LSM_MAX_VALUE_KB` | `-max-value-kb` | `1024` |
+| `LSM_DEMO` | `-demo` | `off` (`on` enables the public sandbox) |
+| `LSM_TRUST_PROXY` | `-trust-proxy` | `off` (`on` behind a reverse proxy) |
 
 ## Running and deploying
 
