@@ -10,6 +10,12 @@
 //	GET    /                                   -> public landing page (no auth;
 //	                                              aggregate stats only, never keys)
 //
+// Optional public demo sandbox (Config.Demo.Enabled), no auth, rate-limited,
+// every key silently prefixed with DemoPrefix:
+//
+//	GET|PUT|DELETE /v1/demo/kv/{key}
+//	GET            /v1/demo/stats
+//
 // Keys are the rest of the path after /v1/kv/, percent-decoded, so they may
 // contain slashes. Values are raw bytes (application/octet-stream).
 package server
@@ -43,6 +49,8 @@ type Config struct {
 	MaxValueBytes int64
 	// Logger receives one line per request. Default slog.Default().
 	Logger *slog.Logger
+	// Demo configures the optional public sandbox. Disabled by default.
+	Demo DemoConfig
 }
 
 const (
@@ -57,6 +65,7 @@ type handler struct {
 	maxValue  int64
 	log       *slog.Logger
 	started   time.Time
+	demo      *demo // nil when the demo sandbox is disabled
 }
 
 // New returns the HTTP handler for d.
@@ -92,6 +101,13 @@ func New(d *db.DB, cfg Config) (http.Handler, error) {
 	mux.Handle("PUT /v1/kv/{key...}", h.auth(h.put))
 	mux.Handle("DELETE /v1/kv/{key...}", h.auth(h.del))
 	mux.Handle("GET /v1/stats", h.auth(h.stats))
+	if cfg.Demo.Enabled {
+		h.demo = newDemo(cfg.Demo)
+		mux.Handle("GET /v1/demo/kv/{key...}", h.demoLimit(h.demoGet))
+		mux.Handle("PUT /v1/demo/kv/{key...}", h.demoLimit(h.demoPut))
+		mux.Handle("DELETE /v1/demo/kv/{key...}", h.demoLimit(h.demoDelete))
+		mux.Handle("GET /v1/demo/stats", h.demoLimit(h.demoStats))
+	}
 	return h.logRequests(mux), nil
 }
 
@@ -132,8 +148,18 @@ func (h *handler) get(w http.ResponseWriter, r *http.Request) {
 		h.dbError(w, err)
 		return
 	}
+	writeValue(w, v)
+}
+
+// writeValue sends a stored value. Values are arbitrary bytes from clients
+// (including anonymous demo users), so the response is locked down: no MIME
+// sniffing, and a sandbox CSP so a value containing HTML can never run as a
+// page on this origin even if a browser navigates to it directly.
+func writeValue(w http.ResponseWriter, v []byte) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", fmt.Sprint(len(v)))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
 	w.WriteHeader(http.StatusOK)
 	w.Write(v)
 }
