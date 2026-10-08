@@ -1,0 +1,12 @@
+.git
+.github
+data
+tmp
+*.wal
+*.log
+*.exe
+*.test
+*.out
+Dockerfile
+.dockerignore
+README.md
