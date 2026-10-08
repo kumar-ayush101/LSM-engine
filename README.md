@@ -177,6 +177,7 @@ run against a build that skipped every 50th record during replay, and it failed 
 | `DELETE` | `/v1/kv/{key}` | `204` (also when the key is missing) |
 | `GET` | `/v1/stats` | JSON: entries, memtable bytes, WAL bytes, last seq, sync policy |
 | `GET` | `/healthz` | `200 ok`, no auth (for load balancers) |
+| `GET` | `/` | Public landing page: project overview, live aggregate stats, API reference, and a "Try it" panel (needs the token). Never shows keys or values. |
 
 Keys are the URL path after `/v1/kv/` (percent-decoded, may contain `/`); values are raw bytes.
 
