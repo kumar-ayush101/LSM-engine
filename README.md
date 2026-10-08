@@ -19,16 +19,14 @@ files on disk, which are merged in the background.
 | W1 | Skip-list memtable, sequence numbers, tombstones, Put/Get/Delete | Done |
 | W2 | Write-ahead log (CRC32C records, group commit, replay, torn-write handling, crash test) | Done |
 | -- | HTTP server (bearer auth, limits, graceful shutdown), Docker image, public demo sandbox, live deployment | Done |
-| W3 | SSTable format (data blocks, sparse index, footer) + background flush | Planned |
-| W4 | Bloom filters, MANIFEST, merged read path | Planned |
-| W5 | Size-tiered compaction (k-way merge) | Planned |
-| W6 | Benchmark harness + results | Planned |
+| W3 | SSTable format (data blocks, sparse index, bloom filter, footer), immutable memtable, background flush, WAL rotation | Done |
+| W4 | Bloom filters, MANIFEST, merged read path, range scans | Done |
+| W5 | Size-tiered compaction (k-way min-heap merge, tombstone-safe drop rules) | Done |
+| W6 | Benchmark harness + measured results | Done |
 
-Data is durable: every write goes to the WAL before it is acknowledged, and the WAL is replayed
-on startup. Until SSTables exist (W3), the whole dataset must fit in the memtable, which is capped
-by `MaxMemtableBytes` (default 256 MiB); writes beyond the cap fail with `ErrMemtableFull`
-(HTTP 507) rather than exhausting memory. The WAL is never truncated yet, so restart time grows
-with total write volume. Both limits go away with flush to SSTables in W3.
+Data is durable: every write goes to the WAL before it is acknowledged. A full memtable is flushed
+in the background to an immutable SSTable and committed in the MANIFEST, after which its WAL file is
+deleted, so memory use and restart time stay bounded regardless of how much has been written.
 
 ## Architecture
 
@@ -52,7 +50,7 @@ with total write volume. Both limits go away with flush to SSTables in W3.
    +-----------------------------------------------------------+
 ```
 
-Components marked Planned in the table above are not implemented yet; the diagram shows the target design.
+Every box in the diagram is implemented.
 
 ## Design (implemented so far)
 
@@ -108,8 +106,9 @@ Compaction (W5) will drop a tombstone only when no older version of the key can 
 
 ### Write-ahead log (`wal`)
 
-Every write is appended to `wal.log` before it touches the memtable. On `Open`, the log is
-replayed to rebuild the memtable, and sequence numbering resumes after the last replayed record.
+Every write is appended to the current WAL file (`NNNNNN.log`) before it touches the memtable. On
+`Open`, unflushed logs are replayed to rebuild the memtable, and sequence numbering resumes after
+the last replayed record.
 
 Record framing:
 
@@ -171,6 +170,126 @@ moment, reopens the directory, and checks that every acknowledged put and delete
 4 kill/restart rounds per sync policy. To check that the test can actually catch lost writes, it was
 run against a build that skipped every 50th record during replay, and it failed as expected.
 
+### WAL rotation, immutable memtable and flush (`db`)
+
+When the active memtable reaches the flush threshold (`MemtableSize`, default 4 MiB):
+
+1. A new numbered WAL file (`000007.log`) is opened; the old one is closed, which fsyncs it.
+2. The memtable becomes immutable and a fresh one takes writes immediately.
+3. A background goroutine writes the immutable memtable to an SSTable, fsyncs it, renames it from
+   `.tmp` into place, and appends a MANIFEST edit ("table 8 added, WALs below 7 are flushed").
+4. Only after that edit is fsynced is the old WAL deleted.
+
+Every crash point is safe: before step 3's MANIFEST edit, recovery replays the old WAL; after it,
+the WAL is garbage and is deleted on startup. At most one memtable is being flushed; if a writer
+fills the next one first, it waits (a write stall, counted in stats) instead of letting memory grow.
+
+### SSTables (`sstable`)
+
+```
+[data block 0][data block 1]...[filter block][index block][footer 48 B]
+```
+
+- Data blocks (~4 KiB) hold entries in internal-key order: `klen | vlen | internal key | value`.
+- The sparse index has one entry per block: the block's last key plus its offset and length. A
+  lookup binary-searches the index (held in memory) and reads exactly one block.
+- Every block carries a CRC-32C, verified on each read; a bad block is an error, never silently
+  wrong data.
+- Tables are written to `NNNNNN.sst.tmp`, fsynced, then renamed, so a table under its final name
+  is always complete.
+- Readers are reference-counted. A table removed by compaction stays readable until the last Get
+  or scan using it finishes, then it is deleted.
+
+### Bloom filters (`bloom`)
+
+Each table has a bloom filter over its user keys, sized with the optimal formulas:
+
+```
+m = -n ln p / (ln 2)^2   bits        (9.6 bits/key at p = 1%)
+k = (m / n) ln 2         hash fns    (7 at p = 1%)
+```
+
+The k positions come from one 64-bit hash by double hashing, `h1 + i*h2 mod m` (Kirsch and
+Mitzenmacher), so a lookup hashes the key once. Measured in the unit test: 1.015% false positives
+for a 1% target and 5.08% for 5%. A filter says "definitely absent" or "maybe"; a damaged filter
+answers "maybe", which costs a block read, never correctness.
+
+### MANIFEST (`manifest`)
+
+The MANIFEST is a log of version edits (table added, table deleted, WAL number, next file number,
+last sequence), framed with the same CRC-checked records as the WAL. A table is live if and only
+if the MANIFEST says so. This is what makes recovery correct after a crash mid-compaction: both
+the inputs and the output exist on disk, and only the MANIFEST knows which set is real. Anything
+else is deleted on startup. On every open the log is rewritten as one snapshot edit (temp file +
+atomic rename), so it never grows without bound.
+
+### Read path
+
+A Get takes a consistent view (memtable, immutable memtable, list of tables, snapshot sequence
+number) under a read lock, then searches newest to oldest:
+
+1. active memtable, 2. immutable memtable, 3. SSTables newest-first.
+
+Tables whose key range cannot contain the key, or whose bloom filter rules it out, are skipped.
+The first version found wins; a tombstone stops the search with "not found".
+
+`Scan(start, end, limit)` merges all of these sources with the same min-heap merging iterator
+compaction uses, keeps the newest version of each key at the snapshot, and skips tombstones.
+
+### Size-tiered compaction (`compaction`)
+
+Tables are kept newest-first and always cover disjoint sequence-number ranges. The picker looks
+for the longest run of adjacent tables of similar size (each within 2x of the run's average), and
+merges it when it has at least 4 tables. If there are more than 12 tables and no such run, it
+merges the 4 adjacent tables with the smallest combined size. Merging only adjacent tables keeps
+the sequence ranges disjoint, so "newest-first" stays well defined.
+
+The merge is a k-way merge with a min-heap (`container/heap`), O(log k) per entry. Drop rules, per
+user key (versions arrive newest-first):
+
+- Versions newer than the oldest live snapshot are kept.
+- The newest version at or below that snapshot is kept; anything older is dropped.
+- That version is dropped too if it is a tombstone **and** the merge includes the oldest table in
+  the database. Otherwise an older table below the merge could still hold a value for the key, and
+  dropping the tombstone would resurrect it. `TestPartialCompactionKeepsTombstones` checks this.
+
+**Size-tiered vs leveled.** Size-tiered rewrites each byte about log_T(N) times (low write
+amplification) at the cost of more tables per read (mitigated by bloom filters) and temporary
+space for a merge. Leveled compaction (LevelDB, RocksDB default) bounds reads to one table per
+level and space overhead to ~10%, but rewrites each byte ~10 times per level. Size-tiered suits a
+write-heavy engine; leveled is on the stretch list.
+
+## Benchmarks
+
+`go run ./cmd/lsmbench` runs the suite below and prints this table. All numbers were measured on
+one machine and depend heavily on the disk's fsync latency: Intel Core i3-1215U (8 threads),
+Samsung MZAL4512HBLU SSD, Windows (amd64), Go 1.25.5. Run it on your hardware for your own numbers.
+
+Workload: 100,000 distinct keys, 100-byte values, uniformly random overwrites (500,000 writes for
+`periodic`/`group`, fewer for `always` because each write waits for its own fsync), then 200,000
+random reads, half of them for keys that were never written. 4 MiB memtables.
+
+| Sync | Writers | Writes/s | Write p50 | Write p99 | Reads/s | Read p50 | Read p99 | Write amp | Tables probed / Get | Space amp | Bloom skips |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| periodic | 8 | 50,865 | 25.7 µs | 2.08 ms | 127,295 | 9.5 µs | 746 µs | 3.13x | 1.72 | 1.11x | 243,556 |
+| group | 8 | 1,932 | 3.49 ms | 12.55 ms | 119,727 | 12.1 µs | 788 µs | 3.13x | 1.73 | 1.11x | 244,906 |
+| always | 8 | 751 | 10.11 ms | 33.12 ms | 291,459 | 1.7 µs | 763 µs | 2.26x | 0.50 | 1.11x | 81,022 |
+| always | 1 | 801 | 1.16 ms | 2.37 ms | 554,842 | 1.0 µs | 11.0 µs | 2.26x | 0.50 | 1.11x | 93,956 |
+
+What the numbers show:
+
+- **Group commit**: with 8 concurrent writers, sharing fsyncs gives 2.6x the throughput of one
+  fsync per write (1,932 vs 751 writes/s) with the same durability. `periodic` is ~26x faster
+  again because nothing waits for the disk, at the cost of a 100 ms power-loss window.
+- **Write amplification** (WAL + flush + compaction bytes / user bytes) is ~3.1x with compaction
+  running: each byte is written once to the WAL, once at flush, and about once more by merges.
+- **Bloom filters**: of the reads for absent keys, about 244,000 table reads were skipped without
+  touching disk; Get probed 1.7 tables on average with 5 tables live.
+- **Space amplification** after a final compaction is 1.11x: the overhead is block framing, the
+  index and the bloom filter (overwritten versions and tombstones are gone).
+- The `always` runs wrote fewer keys, so the dataset fit in one table and reads were faster; they
+  are there for the fsync comparison, not for reads.
+
 ## HTTP server (`server`, `cmd/lsmserver`)
 
 | Method | Path | Result |
@@ -178,7 +297,10 @@ run against a build that skipped every 50th record during replay, and it failed 
 | `PUT` | `/v1/kv/{key}` | body is the value; `204` |
 | `GET` | `/v1/kv/{key}` | `200` with raw value, or `404` |
 | `DELETE` | `/v1/kv/{key}` | `204` (also when the key is missing) |
-| `GET` | `/v1/stats` | JSON: entries, memtable bytes, WAL bytes, last seq, sync policy |
+| `GET` | `/v1/stats` | JSON engine stats: memtable, tables, flushes, compactions, amplification, bloom skips |
+| `GET` | `/v1/scan?prefix=&start=&end=&limit=` | Ordered range scan as JSON, paged with `next` (max 1000 per page) |
+| `POST` | `/v1/admin/flush` | Flush the memtable to an SSTable |
+| `POST` | `/v1/admin/compact` | Flush, then merge every SSTable into one |
 | `GET` | `/healthz` | `200 ok`, no auth (for load balancers) |
 | `GET` | `/stats.json` | Public aggregate counters (entries, last seq, WAL bytes, memtable bytes, uptime, demo budget). No auth; never keys or values. |
 | `GET` | `/` | Public landing page (see below). |
@@ -207,6 +329,7 @@ Optional, off by default. Lets visitors try the engine without the token:
 |---|---|---|
 | `PUT` / `GET` / `DELETE` | `/v1/demo/kv/{key}` | same as the owner API, no auth |
 | `GET` | `/v1/demo/stats` | aggregate counters plus demo budget used |
+| `GET` | `/v1/demo/scan` | range scan confined to the sandbox (max 50 per page) |
 
 Every demo key is stored as `demo/<key>`, so visitors can never read or change other keys; the
 `demo/` prefix is reserved. Abuse is bounded in layers:
@@ -230,8 +353,8 @@ Keys are the URL path after `/v1/kv/` (percent-decoded, may contain `/`); values
 - Limits: key length (1 KiB), value size (`LSM_MAX_VALUE_KB`, default 1 MiB, enforced for both
   `Content-Length` and chunked bodies), header size, and read/write/idle timeouts (including
   `ReadHeaderTimeout` against slowloris).
-- Errors: `401` bad token, `404` missing, `413` too large, `507` memtable full, `503` shutting down
-  or WAL failed.
+- Errors: `401` bad token, `404` missing, `413` too large, `507` demo budget used up, `503`
+  shutting down, WAL failed, or a background flush/compaction failed.
 - Logs: one JSON line per request with the route pattern (`/v1/kv/{key...}`), not the URL, so
   keys never end up in logs.
 - Shutdown: on SIGTERM/SIGINT it stops accepting connections, drains in-flight requests (15 s),
@@ -248,7 +371,8 @@ before exposing it to the internet; the bearer token is sent with every request.
 | `LSM_ADDR` | `-addr` | `:8080` |
 | `LSM_DATA_DIR` | `-data` | `./data` |
 | `LSM_SYNC` | `-sync` | `group` (`always`, `periodic`) |
-| `LSM_MAX_MEMTABLE_MB` | `-max-memtable-mb` | `256` |
+| `LSM_MEMTABLE_MB` | `-memtable-mb` | `4` (flush threshold) |
+| `LSM_MAX_MEMTABLE_MB` | `-max-memtable-mb` | `256` (cap on memtable memory) |
 | `LSM_MAX_VALUE_KB` | `-max-value-kb` | `1024` |
 | `LSM_DEMO` | `-demo` | `off` (`on` enables the public sandbox) |
 | `LSM_TRUST_PROXY` | `-trust-proxy` | `off` (`on` behind a reverse proxy) |
@@ -326,33 +450,27 @@ and a 20 s kill timeout so graceful shutdown can finish. Set the token with
 
 ## Roadmap details
 
-- W3 SSTables: data blocks + sparse index + bloom filter + footer; memtable rotation to an
-  immutable memtable and background flush; WAL rotation, with old logs deleted once their
-  memtable is flushed.
-- W4 Bloom filters sized by `m = -n ln p / (ln 2)^2` bits and `k = (m/n) ln 2` hash functions;
-  MANIFEST file tracking live SSTables for correct recovery after compaction; merged read path.
-- W5 Size-tiered compaction via k-way merge with a min-heap, keeping the newest version per key.
-- W6 Benchmarks: write/read throughput, p99 latency, write/read/space amplification.
-  Results will be added here only from real measurements.
-- Stretch: leveled compaction, range iterators, snapshots API, LRU block cache, block
+- Stretch: leveled compaction (flag-switchable), a public snapshots API, LRU block cache, block
   compression, Prometheus metrics.
 - Phase 2: Raft replication (own implementation) to turn this into a distributed KV store.
 
 ## Layout
 
 ```
-db/             public API: Open, Put, Get, Delete, Close, Stats; WAL replay, sync policies
+db/             public API (Open, Put, Get, Delete, Scan, Flush, Compact, Stats); recovery,
+                WAL rotation, background flush and compaction
 memtable/       skip-list memtable + iterator
 internal/base/  internal keys (user key + seq number + kind) and ordering
 wal/            write-ahead log: framing, group commit, recovery
 server/         HTTP API: auth, limits, error mapping, demo sandbox, rate limiter
 server/web/     embedded landing page (HTML, CSS, JS)
 cmd/lsmserver/  server binary: config, timeouts, graceful shutdown
-sstable/        on-disk sorted tables            (W3)
-bloom/          bloom filters                    (W4)
-manifest/       live-SSTable tracking            (W4)
-compaction/     background merging               (W5)
-bench/          benchmark harness                (W6)
+sstable/        SSTable writer and reader: blocks, sparse index, filter, footer
+bloom/          bloom filters (optimal m/k, double hashing)
+manifest/       version-edit log of live SSTables
+compaction/     k-way merging iterator, drop rules, size-tiered picker
+bench/          benchmark harness
+cmd/lsmbench/   benchmark binary
 ```
 
 ## Usage
@@ -394,7 +512,19 @@ The test suite covers:
   failing file, and group-commit coalescing.
 - DB: persistence across reopen for each sync policy, reopen without `Close`, directory locking,
   memtable cap, randomized writes with repeated reopens checked against a map.
-- Crash test: real process kills mid-write (see above).
+- Crash test: real process kills mid-write, mid-flush and mid-compaction (tiny memtables keep
+  the child flushing and compacting constantly), 4 rounds per sync policy, zero acknowledged writes lost.
+- SSTables: round trips across many blocks, Seek/Get at random snapshots against a model, bloom
+  filters skipping ~99% of absent-key lookups, out-of-order and empty tables rejected, checksum
+  and footer corruption detected, reference counting deferring deletion, concurrent readers.
+- Bloom filters: sizing formulas, no false negatives, measured false-positive rate vs target.
+- MANIFEST: edit round trips, replay and snapshot rewrite, torn final edit, unknown deletes.
+- Compaction: k-way merge order and seeks, error propagation, drop rules at and above the
+  bottom, snapshot horizon, the size-tiered picker.
+- LSM DB: flush, tombstones shadowing older tables, full and partial compaction (tombstones kept
+  when older tables exist), scans against a model, a long random workload with constant flushing
+  and compaction plus reopens, concurrent reads and scans during compaction, garbage cleanup on
+  recovery, and upgrading a W2 single-WAL directory.
 - Server: CRUD, binary values and escaped keys, auth failures, size limits (including chunked
   bodies), error codes, keys absent from logs, and a full start/stop/restart of the binary.
 - Demo sandbox: isolation from owner keys (including path tricks), size limits, the total byte
