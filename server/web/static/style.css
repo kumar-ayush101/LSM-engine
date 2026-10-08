@@ -223,3 +223,4 @@ pre.code { margin: 1rem 0 0; padding: 1.1rem 1.25rem; overflow-x: auto; backgrou
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+.actions-2 { grid-template-columns: 1fr; margin-top: .5rem; }

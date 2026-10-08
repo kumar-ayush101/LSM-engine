@@ -62,6 +62,12 @@
       setStat("wal_bytes", humanBytes(s.wal_bytes));
       setStat("memtable_bytes", humanBytes(s.memtable_bytes));
       setStat("sync_policy", s.sync_policy);
+      setStat("tables", String(s.tables));
+      setStat("table_bytes", humanBytes(s.table_bytes));
+      setStat("flushes", String(s.flushes));
+      setStat("compactions", String(s.compactions));
+      setStat("write_amp", s.write_amplification ? s.write_amplification.toFixed(2) + "x" : "\u2013");
+      setStat("bloom_skips", String(s.bloom_filter_skips));
       var up = stat("uptime");
       if (up) up.textContent = humanDuration(s.uptime_seconds);
       setMeter(s.memtable_bytes, s.memtable_limit);
@@ -133,15 +139,17 @@
       form.token.focus();
       return;
     }
-    if (op !== "stats" && !key) {
+    if (op !== "stats" && op !== "scan" && !key) {
       show([{ cls: "st-err", text: "Enter a key first" }, { text: " (or pick a quick-start example)." }]);
       form.key.focus();
       return;
     }
 
     var base = demo ? "/v1/demo" : "/v1";
-    var url = op === "stats" ? base + "/stats" : base + "/kv/" + encodeURIComponent(key);
-    var method = { get: "GET", put: "PUT", delete: "DELETE", stats: "GET" }[op];
+    var url = op === "stats" ? base + "/stats"
+      : op === "scan" ? base + "/scan?limit=" + (demo ? 50 : 100)
+      : base + "/kv/" + encodeURIComponent(key);
+    var method = { get: "GET", put: "PUT", delete: "DELETE", stats: "GET", scan: "GET" }[op];
     var init = { method: method, headers: {}, cache: "no-store", credentials: "omit" };
     if (!demo) init.headers["Authorization"] = "Bearer " + token;
     if (op === "put") {
@@ -149,7 +157,7 @@
       init.headers["Content-Type"] = "application/octet-stream";
     }
 
-    var label = method + " " + (op === "stats" ? url : base + "/kv/" + key);
+    var label = method + " " + (op === "stats" || op === "scan" ? url : base + "/kv/" + key);
     var buttons = form.querySelectorAll("button");
     buttons.forEach(function (b) { b.disabled = true; });
     show([{ cls: "req", text: "$ " + label }, { cls: "muted", text: "\n  sending..." }]);
@@ -164,6 +172,14 @@
           ? "Stored. Appended to the write-ahead log, fsynced, then inserted into the memtable."
           : "Deleted. A tombstone was written; it shadows any older version of the key.";
         body = "";
+      } else if (op === "scan" && resp.ok) {
+        try {
+          var sr = JSON.parse(body);
+          body = sr.items.length
+            ? sr.items.map(function (it) { return it.key + " = " + (it.value_b64 ? "<binary>" : it.value); }).join("\n")
+            : "(no keys yet: Put something first)";
+          note = sr.count + " key(s) in order, merged from the memtable and every SSTable" + (sr.next ? "; more after " + sr.next : "") + ".";
+        } catch (e) { /* show raw */ }
       } else if (op === "stats" && resp.ok) {
         try { body = JSON.stringify(JSON.parse(body), null, 2); } catch (e) { /* show raw */ }
       } else if (resp.status === 404 && op === "get") {

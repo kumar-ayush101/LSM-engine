@@ -24,7 +24,7 @@
   <div class="wrap hero-body">
     <p class="eyebrow"><span class="pulse" aria-hidden="true"></span> Running live <span class="sep" aria-hidden="true">&middot;</span> up <span data-stat="uptime">{{.Uptime}}</span></p>
     <h1>A storage engine,<br><span class="grad">built from scratch.</span></h1>
-    <p class="lead">A log-structured merge-tree key-value store in Go, using only the standard library. Every write is checksummed, logged and fsynced before it is acknowledged, and survives a hard crash.</p>
+    <p class="lead">A log-structured merge-tree key-value store in Go, using only the standard library: write-ahead log, skip-list memtable, SSTables with bloom filters, a MANIFEST, and size-tiered compaction. Every write is checksummed and fsynced before it is acknowledged, and survives a hard crash.</p>
     <div class="cta">
       <a class="btn btn-primary" href="#try">Try the live demo</a>
       <a class="btn btn-ghost" href="{{.RepoURL}}">View source on GitHub</a>
@@ -33,7 +33,8 @@
       <li>Go standard library only</li>
       <li>Write-ahead log + CRC-32C</li>
       <li>Group commit</li>
-      <li>Skip-list memtable</li>
+      <li>SSTables + bloom filters</li>
+      <li>Size-tiered compaction</li>
       <li>Crash-tested</li>
     </ul>
   </div>
@@ -50,6 +51,10 @@
       <div class="stat"><dt>Last sequence number</dt><dd data-stat="last_seq">{{.LastSeq}}</dd><p class="stat-note">one per write</p></div>
       <div class="stat"><dt>Write-ahead log</dt><dd data-stat="wal_bytes">{{bytes .WALBytes}}</dd><p class="stat-note">on disk, replayed on boot</p></div>
       <div class="stat"><dt>fsync policy</dt><dd data-stat="sync_policy">{{.SyncPolicy}}</dd><p class="stat-note">durable before ack</p></div>
+      <div class="stat"><dt>SSTables on disk</dt><dd data-stat="tables">{{.Tables}}</dd><p class="stat-note"><span data-stat="table_bytes">{{bytes .TableBytes}}</span> sorted, immutable</p></div>
+      <div class="stat"><dt>Flushes / compactions</dt><dd><span data-stat="flushes">{{.Flushes}}</span> / <span data-stat="compactions">{{.Compactions}}</span></dd><p class="stat-note">background work</p></div>
+      <div class="stat"><dt>Write amplification</dt><dd data-stat="write_amp">&ndash;</dd><p class="stat-note">disk bytes / user bytes</p></div>
+      <div class="stat"><dt>Bloom filter skips</dt><dd data-stat="bloom_skips">&ndash;</dd><p class="stat-note">table reads avoided</p></div>
       <div class="stat stat-wide">
         <dt>Memtable memory</dt>
         <dd><span data-stat="memtable_bytes">{{bytes .MemtableBytes}}</span> <span class="muted">of {{bytes .MaxMemtable}}</span></dd>
@@ -93,6 +98,9 @@
             <button type="submit" class="btn btn-del" data-op="delete">Delete</button>
             <button type="submit" class="btn btn-ghost-dark" data-op="stats">Stats</button>
           </div>
+          <div class="actions actions-2">
+            <button type="submit" class="btn btn-ghost-dark" data-op="scan">Scan all keys</button>
+          </div>
           <details class="owner"{{if not .DemoEnabled}} open{{end}}>
             <summary>{{if .DemoEnabled}}Owner access (optional){{else}}Access token{{end}}</summary>
             <div class="field">
@@ -111,7 +119,8 @@
           <pre id="result" class="result" aria-live="polite" tabindex="0"><span class="muted">$ waiting for your first request...
   1. pick a quick-start example (or type a key and value)
   2. press Put, then Get
-  3. press Delete, then Get again to see the tombstone win</span></pre>
+  3. press Delete, then Get again to see the tombstone win
+  4. press Scan all keys for an ordered range scan</span></pre>
           <ol id="history" class="history" aria-label="Recent requests"></ol>
         </div>
       </div>
@@ -127,8 +136,8 @@
       <li class="step"><span class="num" aria-hidden="true">1</span><h3>Sequence number</h3><p>The write gets a unique, increasing 56-bit sequence number. Keys are stored as <code>(key, seq, kind)</code> and sorted newest-first, so a lookup stops at the first match.</p></li>
       <li class="step"><span class="num" aria-hidden="true">2</span><h3>Write-ahead log</h3><p>The record is framed with a CRC-32C checksum and appended to the log. With group commit, one <code>fsync</code> covers every writer waiting at that moment.</p></li>
       <li class="step"><span class="num" aria-hidden="true">3</span><h3>Memtable</h3><p>The entry goes into a skip list (p = 1/4, height 12) behind a read-write lock. Deletes become tombstones that shadow older versions.</p></li>
-      <li class="step"><span class="num" aria-hidden="true">4</span><h3>Publish</h3><p>Readers see the write only after it is durable, so a crash can never undo a value someone has already read.</p></li>
-      <li class="step"><span class="num" aria-hidden="true">5</span><h3>Recovery</h3><p>On restart the log is replayed. A torn final record is trimmed; corruption mid-log stops startup instead of silently losing data.</p></li>
+      <li class="step"><span class="num" aria-hidden="true">4</span><h3>Flush</h3><p>A full memtable is frozen and written in the background to an SSTable: 4 KiB data blocks, a sparse index and a bloom filter, committed in the MANIFEST.</p></li>
+      <li class="step"><span class="num" aria-hidden="true">5</span><h3>Compaction</h3><p>Similar-sized tables are merged with a k-way min-heap merge, keeping the newest version of each key and dropping tombstones only when nothing older exists.</p></li>
     </ol>
   </section>
 
@@ -141,6 +150,8 @@
       <li class="feature"><h3>Group commit</h3><p>Concurrent writers share one fsync. In tests, 200 sync requests needed only 38 fsyncs.</p></li>
       <li class="feature"><h3>fsyncgate-safe</h3><p>A failed fsync makes the log refuse further writes, instead of retrying into silent data loss.</p></li>
       <li class="feature"><h3>Torn-write recovery</h3><p>Tested at every possible crash byte offset: complete records are kept, the torn tail is trimmed.</p></li>
+      <li class="feature"><h3>Bloom filters</h3><p>Sized by m = -n ln p / (ln 2)&sup2;. Lookups for absent keys skip about 99% of table reads.</p></li>
+      <li class="feature"><h3>Crash-safe compaction</h3><p>Every flush and merge commits through a fsynced MANIFEST edit; the crash test kills the process mid-flush and mid-compaction too.</p></li>
       <li class="feature"><h3>Race-free</h3><p>Every test runs under Go's race detector in CI, on every push.</p></li>
       <li class="feature"><h3>Hardened server</h3><p>Constant-time token checks, size limits, timeouts, rate-limited sandbox, and logs that never contain keys.</p></li>
     </ul>
@@ -160,9 +171,12 @@
           <tr><td><span class="m m-get">GET</span></td><td><code>/v1/kv/{key}</code></td><td>Value, or <code>404</code></td><td>token</td></tr>
           <tr><td><span class="m m-del">DELETE</span></td><td><code>/v1/kv/{key}</code></td><td>Write tombstone, <code>204</code></td><td>token</td></tr>
           <tr><td><span class="m m-get">GET</span></td><td><code>/v1/stats</code></td><td>Engine stats (JSON)</td><td>token</td></tr>
+          <tr><td><span class="m m-get">GET</span></td><td><code>/v1/scan?prefix=&amp;start=&amp;end=&amp;limit=</code></td><td>Ordered range scan, paged</td><td>token</td></tr>
+          <tr><td><span class="m m-put">POST</span></td><td><code>/v1/admin/flush</code>, <code>/v1/admin/compact</code></td><td>Force a flush or a full compaction</td><td>token</td></tr>
           {{if .DemoEnabled}}
           <tr><td><span class="m m-any">ANY</span></td><td><code>/v1/demo/kv/{key}</code></td><td>Same as above, under <code>{{.DemoPrefix}}</code></td><td>none</td></tr>
           <tr><td><span class="m m-get">GET</span></td><td><code>/v1/demo/stats</code></td><td>Stats + sandbox budget</td><td>none</td></tr>
+          <tr><td><span class="m m-get">GET</span></td><td><code>/v1/demo/scan</code></td><td>Range scan within the sandbox</td><td>none</td></tr>
           {{end}}
           <tr><td><span class="m m-get">GET</span></td><td><code>/stats.json</code></td><td>Public aggregate counters</td><td>none</td></tr>
           <tr><td><span class="m m-get">GET</span></td><td><code>/healthz</code></td><td><code>ok</code></td><td>none</td></tr>
@@ -186,10 +200,11 @@ curl -H "Authorization: Bearer $TOKEN" https://&lt;host&gt;/v1/kv/user:1</code><
       <li class="done"><span class="tag">Done</span> Skip-list memtable, sequence numbers, tombstones</li>
       <li class="done"><span class="tag">Done</span> Write-ahead log, group commit, crash recovery</li>
       <li class="done"><span class="tag">Done</span> HTTP server, Docker image, live deployment</li>
-      <li><span class="tag">Next</span> SSTables and background flush</li>
-      <li><span class="tag">Planned</span> Bloom filters, MANIFEST, merged read path</li>
-      <li><span class="tag">Planned</span> Size-tiered compaction (k-way merge)</li>
-      <li><span class="tag">Planned</span> Benchmarks from real measurements</li>
+      <li class="done"><span class="tag">Done</span> SSTables, background flush, WAL rotation</li>
+      <li class="done"><span class="tag">Done</span> Bloom filters, MANIFEST, merged read path, range scans</li>
+      <li class="done"><span class="tag">Done</span> Size-tiered compaction (k-way merge)</li>
+      <li class="done"><span class="tag">Done</span> Benchmark harness with measured results</li>
+      <li><span class="tag">Stretch</span> Leveled compaction, block cache, compression</li>
       <li><span class="tag">Phase 2</span> Raft replication: a distributed KV store</li>
     </ol>
   </section>
