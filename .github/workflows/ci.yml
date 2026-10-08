@@ -27,3 +27,38 @@ jobs:
 
       - name: go test -race
         run: go test -race -count=1 ./...
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t lsmserver:ci .
+
+      - name: Smoke test (write, restart container, read back)
+        run: |
+          set -eu
+          TOKEN=$(openssl rand -hex 32)
+          docker volume create lsmdata
+          start() {
+            docker run -d --name lsm -p 8080:8080 -e LSM_AUTH_TOKEN="$TOKEN" -v lsmdata:/data lsmserver:ci
+            for i in $(seq 1 30); do
+              curl -fsS http://localhost:8080/healthz && return 0
+              sleep 1
+            done
+            docker logs lsm; exit 1
+          }
+          start
+          # Unauthenticated requests are rejected.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data v http://localhost:8080/v1/kv/k)" = 401
+          curl -fsS -X PUT -H "Authorization: Bearer $TOKEN" --data 'hello from CI' http://localhost:8080/v1/kv/greeting
+          # Graceful stop (SIGTERM), then a new container on the same volume.
+          docker stop lsm && docker rm lsm
+          start
+          got=$(curl -fsS -H "Authorization: Bearer $TOKEN" http://localhost:8080/v1/kv/greeting)
+          echo "read back: $got"
+          test "$got" = 'hello from CI'
+          curl -fsS -H "Authorization: Bearer $TOKEN" http://localhost:8080/v1/stats
+          docker logs lsm
