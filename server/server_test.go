@@ -199,14 +199,20 @@ func TestChunkedBodyOverLimit(t *testing.T) {
 	}
 }
 
-func TestStorageFull(t *testing.T) {
+// TestWritesBeyondMemtableSize: a small memtable is flushed to SSTables
+// instead of rejecting writes, so every write succeeds and stays readable.
+func TestWritesBeyondMemtableSize(t *testing.T) {
 	f := newFixture(t, &db.Options{MaxMemtableBytes: 1024}, Config{})
-	code := 0
-	for i := 0; i < 100 && code != http.StatusInsufficientStorage; i++ {
-		code, _, _ = f.do("PUT", "/v1/kv/k"+strings.Repeat("x", i), testToken, make([]byte, 100))
+	for i := 0; i < 100; i++ {
+		if code, _, _ := f.do("PUT", "/v1/kv/k"+strings.Repeat("x", i), testToken, make([]byte, 100)); code != 204 {
+			t.Fatalf("put %d: %d", i, code)
+		}
 	}
-	if code != http.StatusInsufficientStorage {
-		t.Fatalf("never got 507, last code %d", code)
+	if code, body, _ := f.do("GET", "/v1/kv/k", testToken, nil); code != 200 || len(body) != 100 {
+		t.Fatalf("read back: %d, %d bytes", code, len(body))
+	}
+	if f.db.Stats().Flushes == 0 {
+		t.Fatal("expected memtable flushes")
 	}
 }
 

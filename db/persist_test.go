@@ -129,8 +129,9 @@ func TestReopenWithoutClose(t *testing.T) {
 			}
 			// Abandon d without Close; release only the lock (the OS would
 			// do this when the process dies) and the file handle.
+			d.closed.Store(true)
+			d.closeFiles() // the OS closes every handle of a dead process
 			d.lock.release()
-			d.log.Close()
 
 			d2 := mustOpen(t, dir, &Options{Sync: pol})
 			defer d2.Close()
@@ -147,8 +148,8 @@ func TestTornWALTailIsDiscardedOnOpen(t *testing.T) {
 	d.Put([]byte("kept"), []byte("yes"))
 	d.Close()
 
-	// Append half a record, as if the process died mid-write.
-	path := filepath.Join(dir, walFileName)
+	// Append half a record to the active WAL, as if the process died mid-write.
+	path := activeLog(t, dir)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +177,7 @@ func TestCorruptWALFailsOpen(t *testing.T) {
 	}
 	d.Close()
 
-	path := filepath.Join(dir, walFileName)
+	path := activeLog(t, dir)
 	b, _ := os.ReadFile(path)
 	b[20] ^= 0xff // inside the first record, with valid records after it
 	os.WriteFile(path, b, 0o644)
@@ -200,18 +201,36 @@ func TestDirectoryLock(t *testing.T) {
 	d2.Close()
 }
 
-func TestMemtableFull(t *testing.T) {
-	d := mustOpen(t, t.TempDir(), &Options{MaxMemtableBytes: 4096})
+// TestSmallMemtableNeverFills: before SSTables a full memtable rejected
+// writes; now it is flushed and writes keep succeeding past the old cap.
+func TestSmallMemtableNeverFills(t *testing.T) {
+	dir := t.TempDir()
+	d := mustOpen(t, dir, &Options{MaxMemtableBytes: 4096})
+	for i := 0; i < 1000; i++ {
+		if err := d.Put([]byte(fmt.Sprintf("k%04d", i)), make([]byte, 100)); err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+	}
+	st := d.Stats()
+	if st.Flushes == 0 || st.MemtableBytes > 4096 {
+		t.Fatalf("expected flushes and a small memtable: %+v", st)
+	}
+	d.Close()
+	d = mustOpen(t, dir, nil)
 	defer d.Close()
-	var err error
-	for i := 0; i < 1000 && err == nil; i++ {
-		err = d.Put([]byte(fmt.Sprint(i)), make([]byte, 100))
+	for i := 0; i < 1000; i += 37 {
+		expect(t, d, fmt.Sprintf("k%04d", i), string(make([]byte, 100)))
 	}
-	if !errors.Is(err, ErrMemtableFull) {
-		t.Fatalf("got %v, want ErrMemtableFull", err)
+}
+
+// activeLog returns the newest WAL file in dir.
+func activeLog(t *testing.T, dir string) string {
+	t.Helper()
+	logs, _ := filepath.Glob(filepath.Join(dir, "*.log"))
+	if len(logs) == 0 {
+		t.Fatal("no WAL file")
 	}
-	// Existing data is still readable.
-	expect(t, d, "0", string(make([]byte, 100)))
+	return logs[len(logs)-1]
 }
 
 func TestTooLarge(t *testing.T) {
