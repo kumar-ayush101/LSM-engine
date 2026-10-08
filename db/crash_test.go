@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/kumar-ayush101/LSM-engine/compaction"
 )
 
 // The crash test runs the test binary itself as a child process (selected
@@ -28,6 +30,14 @@ const (
 	crashWriters   = 4
 )
 
+// crashOpts uses a tiny memtable so the child is constantly rotating WALs,
+// flushing and compacting when it is killed: the kill lands mid-flush or
+// mid-compaction as often as mid-write.
+func crashOpts(pol SyncPolicy) *Options {
+	return &Options{Sync: pol, MemtableSize: 16 << 10, BlockSize: 1024,
+		Compaction: compaction.PickOptions{MinMerge: 3, MaxTables: 6}}
+}
+
 func crashKey(round, writer, i int) string { return fmt.Sprintf("r%d-w%d-%06d", round, writer, i) }
 func crashValue(key string) string         { return "value-of-" + key }
 
@@ -39,7 +49,7 @@ func TestCrashChild(t *testing.T) {
 	}
 	pol, _ := ParseSyncPolicy(os.Getenv(crashPolicyEnv))
 	round, _ := strconv.Atoi(os.Getenv(crashRoundEnv))
-	d, err := Open(dir, &Options{Sync: pol})
+	d, err := Open(dir, crashOpts(pol))
 	if err != nil {
 		fmt.Println("ERR", err)
 		os.Exit(2)
@@ -171,7 +181,7 @@ func TestCrashRecovery(t *testing.T) {
 				}
 
 				// Reopen and verify every acknowledged operation survived.
-				d, err := Open(dir, &Options{Sync: pol})
+				d, err := Open(dir, crashOpts(pol))
 				if err != nil {
 					t.Fatalf("round %d: reopen after kill: %v", round, err)
 				}
@@ -198,8 +208,8 @@ func TestCrashRecovery(t *testing.T) {
 				if err := d.Close(); err != nil {
 					t.Fatal(err)
 				}
-				t.Logf("round %d: killed after %d acks this round; %d acked total, %d lost; memtable entries %d, WAL %d bytes",
-					round, roundAcks, len(acked), lost, st.Entries, st.WALBytes)
+				t.Logf("round %d: killed after %d acks this round; %d acked total, %d lost; %d tables, %d compactions on reopen",
+					round, roundAcks, len(acked), lost, st.Tables, st.Compactions)
 				if lost > 0 {
 					t.FailNow()
 				}
