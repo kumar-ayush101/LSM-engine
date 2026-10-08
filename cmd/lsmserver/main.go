@@ -8,7 +8,8 @@
 //	LSM_ADDR         listen address            (default ":8080",  -addr)
 //	LSM_DATA_DIR     database directory        (default "./data", -data)
 //	LSM_SYNC         group | always | periodic (default "group",  -sync)
-//	LSM_MAX_MEMTABLE_MB  memtable cap in MiB   (default 256,      -max-memtable-mb)
+//	LSM_MEMTABLE_MB      flush threshold, MiB  (default 4,        -memtable-mb)
+//	LSM_MAX_MEMTABLE_MB  memtable memory cap   (default 256,      -max-memtable-mb)
 //	LSM_MAX_VALUE_KB     max value size in KiB (default 1024,     -max-value-kb)
 //	LSM_DEMO         on | off: public, rate-limited demo sandbox at
 //	                 /v1/demo/... with no token (default off, -demo)
@@ -56,6 +57,7 @@ type config struct {
 	sync          db.SyncPolicy
 	token         string
 	maxMemtableMB int64
+	memtableMB    int64
 	maxValueKB    int64
 	demo          bool
 	trustProxy    bool
@@ -83,7 +85,8 @@ func parseConfig(args []string, getenv func(string) string) (config, error) {
 	addr := fs.String("addr", envOr("LSM_ADDR", ":8080"), "listen address")
 	dataDir := fs.String("data", envOr("LSM_DATA_DIR", "./data"), "database directory")
 	syncStr := fs.String("sync", envOr("LSM_SYNC", "group"), "fsync policy: group, always, periodic")
-	memMB := fs.String("max-memtable-mb", envOr("LSM_MAX_MEMTABLE_MB", "256"), "memtable cap in MiB")
+	memMB := fs.String("max-memtable-mb", envOr("LSM_MAX_MEMTABLE_MB", "256"), "cap on memtable memory in MiB")
+	flushMB := fs.String("memtable-mb", envOr("LSM_MEMTABLE_MB", "4"), "memtable flush threshold in MiB")
 	valKB := fs.String("max-value-kb", envOr("LSM_MAX_VALUE_KB", "1024"), "max value size in KiB")
 	demoStr := fs.String("demo", envOr("LSM_DEMO", "off"), "enable the public demo sandbox: on or off")
 	proxyStr := fs.String("trust-proxy", envOr("LSM_TRUST_PROXY", "off"), "take client IP from X-Forwarded-For: on or off")
@@ -100,6 +103,9 @@ func parseConfig(args []string, getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 	if c.maxMemtableMB, err = positive("max-memtable-mb", *memMB); err != nil {
+		return config{}, err
+	}
+	if c.memtableMB, err = positive("memtable-mb", *flushMB); err != nil {
 		return config{}, err
 	}
 	if c.maxValueKB, err = positive("max-value-kb", *valKB); err != nil {
@@ -137,13 +143,14 @@ func run(ctx context.Context, args []string, getenv func(string) string, logger 
 	d, err := db.Open(cfg.dataDir, &db.Options{
 		Sync:             cfg.sync,
 		MaxMemtableBytes: cfg.maxMemtableMB << 20,
+		MemtableSize:     cfg.memtableMB << 20,
 	})
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}
 	st := d.Stats()
 	logger.Info("database opened", "dir", cfg.dataDir, "sync", st.SyncPolicy,
-		"entries", st.Entries, "wal_bytes", st.WALBytes, "last_seq", st.LastSeq)
+		"entries", st.Entries, "tables", st.Tables, "table_bytes", st.TableBytes, "last_seq", st.LastSeq)
 
 	h, err := server.New(d, server.Config{
 		Token:         cfg.token,
