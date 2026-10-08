@@ -29,5 +29,9 @@ ENV LSM_ADDR=:8080 \
 
 EXPOSE 8080
 VOLUME ["/data"]
-USER nonroot:nonroot
+# Non-root by default. Platforms that mount a root-owned volume at /data
+# (e.g. Fly.io) can build with --build-arg RUNTIME_USER=root; the process
+# still runs inside its own isolated VM/container.
+ARG RUNTIME_USER=nonroot:nonroot
+USER ${RUNTIME_USER}
 ENTRYPOINT ["/usr/local/bin/lsmserver"]

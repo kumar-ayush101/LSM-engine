@@ -1,0 +1,58 @@
+# Fly.io deployment config.
+#
+# One-time setup (see README "Deploy on Fly.io"):
+#   fly secrets set LSM_AUTH_TOKEN=<long random string>
+#   fly deploy --ha=false
+#
+# Single machine only: this is a single-node engine and each Fly volume is
+# attached to exactly one machine. Never scale above 1.
+
+app = "lsm-engine"
+primary_region = "bom" # Mumbai; closest region to India
+
+# The server drains in-flight requests for up to 15s on SIGTERM, then
+# fsyncs and closes the WAL. Give it time before Fly force-kills it.
+kill_signal = "SIGTERM"
+kill_timeout = "20s"
+
+[build]
+  dockerfile = "Dockerfile"
+  [build.args]
+    # Fly mounts volumes owned by root, so the non-root user could not
+    # write to /data.
+    RUNTIME_USER = "root"
+
+[env]
+  LSM_ADDR = ":8080"
+  LSM_DATA_DIR = "/data"
+  LSM_SYNC = "group"
+  # Keep the memtable well below the 256 MB VM so the process is never
+  # OOM-killed; writes past this cap get HTTP 507 instead.
+  LSM_MAX_MEMTABLE_MB = "64"
+  # LSM_AUTH_TOKEN is a secret: set it with `fly secrets set`, never here.
+
+# Persistent disk. Without it, every deploy or restart wipes the data.
+[mounts]
+  source = "lsm_data"
+  destination = "/data"
+  initial_size = "1gb"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Stop when idle to save cost; the next request starts it again and the
+  # WAL is replayed on boot.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/healthz"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
