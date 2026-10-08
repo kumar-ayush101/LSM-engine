@@ -27,7 +27,7 @@ func TestDemoDisabledByDefault(t *testing.T) {
 		t.Fatalf("PUT with demo off: %d", code)
 	}
 	_, body, _ := f.do("GET", "/", "", nil)
-	if strings.Contains(string(body), "public demo sandbox") {
+	if strings.Contains(string(body), "/v1/demo/kv/") || !strings.Contains(string(body), `data-demo="off"`) {
 		t.Fatal("landing page advertises a disabled sandbox")
 	}
 }
@@ -54,7 +54,7 @@ func TestDemoCRUDWithoutToken(t *testing.T) {
 		t.Fatalf("GET after DELETE: %d", code)
 	}
 	_, page, _ := f.do("GET", "/", "", nil)
-	if !strings.Contains(string(page), "public demo sandbox") || !strings.Contains(string(page), `data-demo="on"`) {
+	if !strings.Contains(string(page), "/v1/demo/kv/") || !strings.Contains(string(page), `data-demo="on"`) {
 		t.Fatal("landing page does not offer the sandbox")
 	}
 }

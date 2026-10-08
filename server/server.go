@@ -97,6 +97,7 @@ func New(d *db.DB, cfg Config) (http.Handler, error) {
 	mux.HandleFunc("GET /{$}", h.index)
 	mux.Handle("GET /static/", h.static())
 	mux.HandleFunc("GET /healthz", h.health)
+	mux.HandleFunc("GET /stats.json", h.publicStats)
 	mux.Handle("GET /v1/kv/{key...}", h.auth(h.get))
 	mux.Handle("PUT /v1/kv/{key...}", h.auth(h.put))
 	mux.Handle("DELETE /v1/kv/{key...}", h.auth(h.del))

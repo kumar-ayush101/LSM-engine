@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -21,7 +22,7 @@ func TestLandingPage(t *testing.T) {
 		}
 	}
 	// Live stats are rendered, but never keys, values or the token.
-	if !strings.Contains(page, "<dd>1</dd>") {
+	if !strings.Contains(page, `data-stat="entries">1</dd>`) {
 		t.Errorf("expected entry count 1 on page")
 	}
 	for _, secret := range []string{"private-key-name", "private-value", testToken} {
@@ -72,5 +73,34 @@ func TestUnknownPathsStill404(t *testing.T) {
 	// The landing page must not make the API reachable without auth.
 	if code, _, _ := f.do("GET", "/v1/stats", "", nil); code != 401 {
 		t.Errorf("/v1/stats without token: %d", code)
+	}
+}
+
+func TestPublicStatsJSON(t *testing.T) {
+	f := newFixture(t, nil, Config{})
+	f.do("PUT", "/v1/kv/private-key-name", testToken, []byte("private-value"))
+	code, body, hdr := f.do("GET", "/stats.json", "", nil) // no token
+	if code != 200 || !strings.HasPrefix(hdr.Get("Content-Type"), "application/json") {
+		t.Fatalf("GET /stats.json: %d %v", code, hdr)
+	}
+	var ps PublicStats
+	if err := json.Unmarshal(body, &ps); err != nil {
+		t.Fatal(err)
+	}
+	if ps.Entries != 1 || ps.LastSeq != 1 || ps.WALBytes == 0 || ps.MemtableLimit == 0 || ps.DemoEnabled {
+		t.Fatalf("unexpected %+v", ps)
+	}
+	for _, secret := range []string{"private-key-name", "private-value", testToken} {
+		if strings.Contains(string(body), secret) {
+			t.Fatalf("/stats.json leaks %q", secret)
+		}
+	}
+}
+
+func TestHumanBytes(t *testing.T) {
+	for n, want := range map[int64]string{0: "0 B", 1023: "1023 B", 1024: "1.0 KiB", 1536: "1.5 KiB", 128 << 20: "128.0 MiB", 3 << 30: "3.0 GiB"} {
+		if got := humanBytes(n); got != want {
+			t.Errorf("humanBytes(%d) = %q, want %q", n, got, want)
+		}
 	}
 }
