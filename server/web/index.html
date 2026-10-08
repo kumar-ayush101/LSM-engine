@@ -59,23 +59,34 @@
     </table>
     <pre><code>curl -X PUT -H "Authorization: Bearer $TOKEN" --data 'alice' https://&lt;host&gt;/v1/kv/user:1
 curl -H "Authorization: Bearer $TOKEN" https://&lt;host&gt;/v1/kv/user:1</code></pre>
+    {{if .DemoEnabled}}
+    <p>Public sandbox, no token needed (rate-limited, keys stored under <code>{{.DemoPrefix}}</code>):</p>
+    <pre><code>curl -X PUT --data 'hello' https://&lt;host&gt;/v1/demo/kv/greeting
+curl https://&lt;host&gt;/v1/demo/kv/greeting
+curl https://&lt;host&gt;/v1/demo/stats</code></pre>
+    {{end}}
   </section>
 
   <section aria-labelledby="try">
     <h2 id="try">Try it</h2>
+    {{if .DemoEnabled}}
+    <p>Leave the token empty to use the <strong>public demo sandbox</strong>: no sign-up, real engine, real write-ahead log. Your keys are stored under <code>{{.DemoPrefix}}</code>, so the sandbox is isolated from everything else.</p>
+    <p class="note">Sandbox limits: keys up to {{.DemoMaxKey}} bytes, values up to {{.DemoMaxValue}} bytes, {{.DemoPerMinute}} requests per minute. Anything you write is visible to other visitors who guess the key, so do not enter personal information. The sandbox resets when the server restarts.</p>
+    {{else}}
     <p class="note">Requires the access token for this instance. The token stays in this browser tab and is sent only to this server.</p>
-    <form id="kv" novalidate>
+    {{end}}
+    <form id="kv" novalidate data-demo="{{if .DemoEnabled}}on{{else}}off{{end}}">
       <div class="field">
-        <label for="token">Access token</label>
-        <input id="token" name="token" type="password" autocomplete="off" spellcheck="false" required>
+        <label for="token">Access token{{if .DemoEnabled}} <span class="hint">(optional; owner only)</span>{{end}}</label>
+        <input id="token" name="token" type="password" autocomplete="off" spellcheck="false"{{if not .DemoEnabled}} required{{end}}>
       </div>
       <div class="field">
         <label for="key">Key</label>
-        <input id="key" name="key" type="text" autocomplete="off" spellcheck="false" maxlength="1024" placeholder="user:1" required>
+        <input id="key" name="key" type="text" autocomplete="off" spellcheck="false" maxlength="{{if .DemoEnabled}}{{.DemoMaxKey}}{{else}}1024{{end}}" placeholder="user:1" required>
       </div>
       <div class="field">
         <label for="value">Value <span class="hint">(for Put)</span></label>
-        <textarea id="value" name="value" rows="3" spellcheck="false" placeholder="alice"></textarea>
+        <textarea id="value" name="value" rows="3" spellcheck="false" placeholder="alice"{{if .DemoEnabled}} maxlength="{{.DemoMaxValue}}"{{end}}></textarea>
       </div>
       <div class="actions">
         <button type="submit" data-op="get">Get</button>

@@ -23,8 +23,12 @@ func TestParseConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.addr != ":8080" || c.dataDir != "./data" || c.sync != db.SyncGroup || c.maxMemtableMB != 256 || c.maxValueKB != 1024 {
+	if c.addr != ":8080" || c.dataDir != "./data" || c.sync != db.SyncGroup || c.maxMemtableMB != 256 || c.maxValueKB != 1024 || c.demo || c.trustProxy {
 		t.Fatalf("defaults: %+v", c)
+	}
+	c, err = parseConfig(nil, env(map[string]string{"LSM_AUTH_TOKEN": tok, "LSM_DEMO": "on", "LSM_TRUST_PROXY": "true"}))
+	if err != nil || !c.demo || !c.trustProxy {
+		t.Fatalf("demo switches: %+v, %v", c, err)
 	}
 
 	c, err = parseConfig([]string{"-addr", ":9000", "-sync", "always"}, env(map[string]string{
@@ -48,6 +52,8 @@ func TestParseConfig(t *testing.T) {
 		{[]string{"-max-value-kb", "abc"}, map[string]string{"LSM_AUTH_TOKEN": tok}},
 		{[]string{"stray"}, map[string]string{"LSM_AUTH_TOKEN": tok}},
 		{[]string{"-token", tok}, map[string]string{}}, // no token flag exists
+		{nil, map[string]string{"LSM_AUTH_TOKEN": tok, "LSM_DEMO": "maybe"}},
+		{nil, map[string]string{"LSM_AUTH_TOKEN": tok, "LSM_TRUST_PROXY": "2"}},
 	}
 	for i, b := range bad {
 		if _, err := parseConfig(b.args, env(b.env)); err == nil {

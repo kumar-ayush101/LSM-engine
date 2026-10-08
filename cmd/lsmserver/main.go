@@ -10,6 +10,11 @@
 //	LSM_SYNC         group | always | periodic (default "group",  -sync)
 //	LSM_MAX_MEMTABLE_MB  memtable cap in MiB   (default 256,      -max-memtable-mb)
 //	LSM_MAX_VALUE_KB     max value size in KiB (default 1024,     -max-value-kb)
+//	LSM_DEMO         on | off: public, rate-limited demo sandbox at
+//	                 /v1/demo/... with no token (default off, -demo)
+//	LSM_TRUST_PROXY  on | off: take the client IP for rate limiting from
+//	                 X-Forwarded-For; enable only behind a reverse proxy
+//	                 such as Render or Fly (default off, -trust-proxy)
 //
 // On SIGINT or SIGTERM it stops accepting connections, lets in-flight
 // requests finish (up to 15s), then closes the DB, which syncs the WAL.
@@ -27,6 +32,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,6 +57,18 @@ type config struct {
 	token         string
 	maxMemtableMB int64
 	maxValueKB    int64
+	demo          bool
+	trustProxy    bool
+}
+
+func parseSwitch(name, s string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "0", "off", "false", "no":
+		return false, nil
+	case "1", "on", "true", "yes":
+		return true, nil
+	}
+	return false, fmt.Errorf("%s must be on or off, got %q", name, s)
 }
 
 func parseConfig(args []string, getenv func(string) string) (config, error) {
@@ -67,6 +85,8 @@ func parseConfig(args []string, getenv func(string) string) (config, error) {
 	syncStr := fs.String("sync", envOr("LSM_SYNC", "group"), "fsync policy: group, always, periodic")
 	memMB := fs.String("max-memtable-mb", envOr("LSM_MAX_MEMTABLE_MB", "256"), "memtable cap in MiB")
 	valKB := fs.String("max-value-kb", envOr("LSM_MAX_VALUE_KB", "1024"), "max value size in KiB")
+	demoStr := fs.String("demo", envOr("LSM_DEMO", "off"), "enable the public demo sandbox: on or off")
+	proxyStr := fs.String("trust-proxy", envOr("LSM_TRUST_PROXY", "off"), "take client IP from X-Forwarded-For: on or off")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -83,6 +103,12 @@ func parseConfig(args []string, getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 	if c.maxValueKB, err = positive("max-value-kb", *valKB); err != nil {
+		return config{}, err
+	}
+	if c.demo, err = parseSwitch("demo", *demoStr); err != nil {
+		return config{}, err
+	}
+	if c.trustProxy, err = parseSwitch("trust-proxy", *proxyStr); err != nil {
 		return config{}, err
 	}
 	if len(c.token) < server.MinTokenLen {
@@ -122,6 +148,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, logger 
 	h, err := server.New(d, server.Config{
 		Token:         cfg.token,
 		MaxValueBytes: cfg.maxValueKB << 10,
+		Demo:          server.DemoConfig{Enabled: cfg.demo, TrustProxy: cfg.trustProxy},
 		Logger:        logger,
 	})
 	if err != nil {

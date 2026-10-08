@@ -34,6 +34,12 @@ type indexData struct {
 	LastSeq       uint64
 	SyncPolicy    string
 	Uptime        string
+
+	DemoEnabled   bool
+	DemoPrefix    string
+	DemoMaxKey    int
+	DemoMaxValue  int64
+	DemoPerMinute int
 }
 
 // index renders the public landing page. It shows aggregate counters only
@@ -49,6 +55,13 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		LastSeq:       st.LastSeq,
 		SyncPolicy:    st.SyncPolicy,
 		Uptime:        time.Since(h.started).Round(time.Second).String(),
+	}
+	if h.demo != nil {
+		data.DemoEnabled = true
+		data.DemoPrefix = DemoPrefix
+		data.DemoMaxKey = h.demo.cfg.MaxKeyBytes
+		data.DemoMaxValue = h.demo.cfg.MaxValueBytes
+		data.DemoPerMinute = h.demo.cfg.PerIPPerMinute
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
