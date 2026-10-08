@@ -122,18 +122,7 @@ func TestFilterDropRules(t *testing.T) {
 		{ik("c", 7, base.KindDelete), ""}, // lone tombstone
 		{ik("d", 1, base.KindSet), "d1"},
 	}
-	run := func(bottom bool) ([]string, Stats) {
-		var out []string
-		st, err := Filter(func() Iterator { s := newSlice(entries); s.SeekToFirst(); return s }(), bottom,
-			func(k base.InternalKey, v []byte) error {
-				out = append(out, fmt.Sprintf("%s#%d%s=%s", k.UserKey, k.Seq, map[base.Kind]string{base.KindSet: "", base.KindDelete: "D"}[k.Kind], v))
-				return nil
-			})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return out, st
-	}
+	run := func(bottom bool) ([]string, Stats) { return runFilter(t, entries, bottom, base.MaxSeqNum) }
 
 	// Not bottom: older tables may hold "b" or "c", so tombstones stay.
 	out, st := run(false)
@@ -151,6 +140,44 @@ func TestFilterDropRules(t *testing.T) {
 	if st.DroppedVersions != 2 || st.DroppedTombstones != 2 || st.OutputEntries != 2 {
 		t.Fatalf("bottom stats: %+v", st)
 	}
+}
+
+// TestFilterRespectsHorizon: versions newer than the oldest live snapshot
+// must not shadow (and drop) the version that snapshot still needs.
+func TestFilterRespectsHorizon(t *testing.T) {
+	entries := []kv{
+		{ik("k", 9, base.KindSet), "v9"},  // newer than horizon: kept
+		{ik("k", 7, base.KindDelete), ""}, // newer than horizon: kept
+		{ik("k", 5, base.KindSet), "v5"},  // newest <= horizon: kept
+		{ik("k", 3, base.KindSet), "v3"},  // shadowed for everyone: dropped
+		{ik("x", 8, base.KindDelete), ""}, // > horizon: kept even at bottom
+		{ik("x", 2, base.KindSet), "x2"},  // newest <= horizon: kept
+		{ik("y", 4, base.KindDelete), ""}, // <= horizon tombstone at bottom: dropped
+		{ik("y", 1, base.KindSet), "y1"},  // shadowed: dropped
+	}
+	out, st := runFilter(t, entries, true, 6)
+	if fmt.Sprint(out) != "[k#9=v9 k#7D= k#5=v5 x#8D= x#2=x2]" {
+		t.Fatalf("got %v", out)
+	}
+	if st.DroppedVersions != 2 || st.DroppedTombstones != 1 {
+		t.Fatalf("stats %+v", st)
+	}
+}
+
+func runFilter(t *testing.T, entries []kv, bottom bool, horizon base.SeqNum) ([]string, Stats) {
+	t.Helper()
+	var out []string
+	s := newSlice(entries)
+	s.SeekToFirst()
+	st, err := Filter(s, bottom, horizon,
+		func(k base.InternalKey, v []byte) error {
+			out = append(out, fmt.Sprintf("%s#%d%s=%s", k.UserKey, k.Seq, map[base.Kind]string{base.KindSet: "", base.KindDelete: "D"}[k.Kind], v))
+			return nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out, st
 }
 
 func TestPick(t *testing.T) {

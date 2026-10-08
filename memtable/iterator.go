@@ -62,3 +62,13 @@ func (it *Iterator) Key() base.InternalKey {
 func (it *Iterator) Value() []byte {
 	return it.n.value
 }
+
+// Err always returns nil: an in-memory iterator cannot fail. It exists so
+// memtable and SSTable iterators share one interface.
+func (it *Iterator) Err() error { return nil }
+
+// Close releases nothing and always returns nil (see Err).
+func (it *Iterator) Close() error {
+	it.n = nil
+	return nil
+}

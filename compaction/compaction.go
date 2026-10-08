@@ -156,34 +156,48 @@ type Stats struct {
 // Filter streams it (already positioned, e.g. via SeekToFirst) and calls
 // emit for each entry that must survive the merge.
 //
-// Drop rules:
+// horizon is the oldest snapshot any reader of the output can use: every
+// reader that will see the merged table reads at a sequence number >=
+// horizon. (The DB passes its visible sequence number at the start of the
+// merge; readers that started earlier keep using the input tables, which
+// they hold references to.)
 //
-//  1. Within one user key, versions arrive newest-first. Only the newest is
-//     kept; older ones can never be read again. This is safe without
-//     snapshot tracking because in-flight readers hold references to the
-//     input tables, not to the output.
-//  2. A tombstone is kept unless bottom is true, meaning the merge includes
-//     the oldest table in the database. If older tables exist below the
-//     merge, they may hold a value for the key, and dropping the tombstone
-//     would resurrect it.
-func Filter(it Iterator, bottom bool, emit func(key base.InternalKey, value []byte) error) (Stats, error) {
+// Drop rules, per user key, with versions arriving newest-first:
+//
+//  1. Versions newer than horizon are all kept: a reader between two of
+//     them needs the older one.
+//  2. The newest version at or below horizon is kept; it is what a reader
+//     at horizon sees.
+//  3. Anything older than that is shadowed for every possible reader and
+//     is dropped.
+//  4. The version kept by rule 2 is dropped too if it is a tombstone and
+//     bottom is true (the merge includes the oldest table in the
+//     database). If older tables exist below the merge, they may hold a
+//     value for the key, and dropping the tombstone would resurrect it.
+func Filter(it Iterator, bottom bool, horizon base.SeqNum, emit func(key base.InternalKey, value []byte) error) (Stats, error) {
 	var (
 		st      Stats
 		lastKey []byte
 		haveKey bool
+		covered bool // a version <= horizon was already seen for lastKey
 	)
 	for ; it.Valid(); it.Next() {
 		k := it.Key()
 		st.InputEntries++
-		if haveKey && bytes.Equal(k.UserKey, lastKey) {
-			st.DroppedVersions++
+		if !haveKey || !bytes.Equal(k.UserKey, lastKey) {
+			lastKey = append(lastKey[:0], k.UserKey...)
+			haveKey, covered = true, false
+		}
+		if covered {
+			st.DroppedVersions++ // rule 3
 			continue
 		}
-		lastKey = append(lastKey[:0], k.UserKey...)
-		haveKey = true
-		if k.Kind == base.KindDelete && bottom {
-			st.DroppedTombstones++
-			continue
+		if k.Seq <= horizon {
+			covered = true
+			if k.Kind == base.KindDelete && bottom {
+				st.DroppedTombstones++ // rule 4
+				continue
+			}
 		}
 		if err := emit(k, it.Value()); err != nil {
 			return st, err
