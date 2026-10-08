@@ -4,105 +4,201 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LSM-engine: a key-value storage engine in Go</title>
-<meta name="description" content="A log-structured merge-tree key-value storage engine written from scratch in Go, with a write-ahead log, group commit and crash recovery.">
+<meta name="description" content="A log-structured merge-tree key-value storage engine written from scratch in Go, with a write-ahead log, group commit and crash recovery. Try the live demo.">
+<meta name="theme-color" content="#0b1020">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<header>
-  <div class="wrap">
-    <h1>LSM-engine</h1>
-    <p class="tagline">A log-structured merge-tree key-value storage engine, written from scratch in Go using only the standard library.</p>
-    <p><a class="button" href="{{.RepoURL}}">Source code on GitHub</a> <span class="status" role="status"><span class="dot" aria-hidden="true"></span> Online</span></p>
+
+<header class="hero">
+  <nav class="nav wrap" aria-label="Primary">
+    <span class="brand"><span class="logo" aria-hidden="true">&#9638;</span> LSM-engine</span>
+    <ul>
+      <li><a href="#try">Live demo</a></li>
+      <li><a href="#how">How it works</a></li>
+      <li><a href="#api">API</a></li>
+      <li><a href="{{.RepoURL}}">GitHub</a></li>
+    </ul>
+  </nav>
+  <div class="wrap hero-body">
+    <p class="eyebrow"><span class="pulse" aria-hidden="true"></span> Running live <span class="sep" aria-hidden="true">&middot;</span> up <span data-stat="uptime">{{.Uptime}}</span></p>
+    <h1>A storage engine,<br><span class="grad">built from scratch.</span></h1>
+    <p class="lead">A log-structured merge-tree key-value store in Go, using only the standard library. Every write is checksummed, logged and fsynced before it is acknowledged, and survives a hard crash.</p>
+    <div class="cta">
+      <a class="btn btn-primary" href="#try">Try the live demo</a>
+      <a class="btn btn-ghost" href="{{.RepoURL}}">View source on GitHub</a>
+    </div>
+    <ul class="chips" aria-label="Highlights">
+      <li>Go standard library only</li>
+      <li>Write-ahead log + CRC-32C</li>
+      <li>Group commit</li>
+      <li>Skip-list memtable</li>
+      <li>Crash-tested</li>
+    </ul>
   </div>
 </header>
 
-<main id="main" class="wrap">
-  <section aria-labelledby="live">
-    <h2 id="live">Live engine stats</h2>
-    <p class="note">Read from this running instance when the page loaded. Aggregate counters only; no keys or values are shown.</p>
+<main id="main">
+  <section class="wrap stats-section" aria-labelledby="live">
+    <div class="section-head">
+      <h2 id="live">Live engine stats</h2>
+      <p class="muted"><span class="pulse" aria-hidden="true"></span> Refreshes automatically. Aggregate counters only; keys and values are never shown.</p>
+    </div>
     <dl class="stats">
-      <div><dt>Entries in memtable</dt><dd>{{.Entries}}</dd></div>
-      <div><dt>Last sequence number</dt><dd>{{.LastSeq}}</dd></div>
-      <div><dt>Write-ahead log size</dt><dd>{{.WALBytes}} bytes</dd></div>
-      <div><dt>Memtable memory</dt><dd>{{.MemtableBytes}} / {{.MaxMemtable}} bytes</dd></div>
-      <div><dt>fsync policy</dt><dd>{{.SyncPolicy}}</dd></div>
-      <div><dt>Uptime</dt><dd>{{.Uptime}}</dd></div>
+      <div class="stat"><dt>Entries in memtable</dt><dd data-stat="entries">{{.Entries}}</dd><p class="stat-note">puts + tombstones</p></div>
+      <div class="stat"><dt>Last sequence number</dt><dd data-stat="last_seq">{{.LastSeq}}</dd><p class="stat-note">one per write</p></div>
+      <div class="stat"><dt>Write-ahead log</dt><dd data-stat="wal_bytes">{{bytes .WALBytes}}</dd><p class="stat-note">on disk, replayed on boot</p></div>
+      <div class="stat"><dt>fsync policy</dt><dd data-stat="sync_policy">{{.SyncPolicy}}</dd><p class="stat-note">durable before ack</p></div>
+      <div class="stat stat-wide">
+        <dt>Memtable memory</dt>
+        <dd><span data-stat="memtable_bytes">{{bytes .MemtableBytes}}</span> <span class="muted">of {{bytes .MaxMemtable}}</span></dd>
+        <div class="meter" role="progressbar" aria-label="Memtable memory used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{.MemPercent}}" data-stat="mem_meter"><span class="meter-fill" data-stat="mem_fill"></span></div>
+      </div>
     </dl>
   </section>
 
-  <section aria-labelledby="how">
-    <h2 id="how">How a write flows</h2>
-    <ol>
-      <li><strong>Sequence number.</strong> Each write gets a unique, increasing 56-bit sequence number. Keys are stored as <code>(user key, seq, kind)</code>, sorted newest-first, so a lookup stops at the first match.</li>
-      <li><strong>Write-ahead log.</strong> The record is framed with a CRC-32C checksum and appended to the log. With group commit, one <code>fsync</code> is shared by every writer waiting at the same time.</li>
-      <li><strong>Memtable.</strong> The write is inserted into a skip list (p = 1/4, max height 12) guarded by a read-write lock. Deletes are tombstones, not removals.</li>
-      <li><strong>Publish.</strong> Readers only see the write after it is durable, so a crash can never undo a value someone already read.</li>
-      <li><strong>Recovery.</strong> On restart the log is replayed. A torn final record is truncated; corruption in the middle stops startup instead of silently losing data.</li>
+  <section class="band" aria-labelledby="try">
+    <div class="wrap">
+      <div class="section-head">
+        <h2 id="try">Try it live</h2>
+        {{if .DemoEnabled}}
+        <p class="muted">No sign-up. Leave the token empty to use the public sandbox: real engine, real write-ahead log. Your keys are stored under <code>{{.DemoPrefix}}</code>, isolated from everything else.</p>
+        {{else}}
+        <p class="muted">Requires the access token for this instance. The token stays in this tab and is sent only to this server.</p>
+        {{end}}
+      </div>
+
+      <div class="playground">
+        <form id="kv" class="card" novalidate data-demo="{{if .DemoEnabled}}on{{else}}off{{end}}">
+          {{if .DemoEnabled}}
+          <div class="quick" role="group" aria-label="Examples">
+            <span class="muted">Quick start:</span>
+            <button type="button" class="chip-btn" data-fill-key="user:1" data-fill-value="alice">user:1 = alice</button>
+            <button type="button" class="chip-btn" data-fill-key="city" data-fill-value="Bengaluru">city = Bengaluru</button>
+            <button type="button" class="chip-btn" data-fill-key="lang" data-fill-value="Go">lang = Go</button>
+          </div>
+          {{end}}
+          <div class="field">
+            <label for="key">Key</label>
+            <input id="key" name="key" type="text" autocomplete="off" spellcheck="false" maxlength="{{if .DemoEnabled}}{{.DemoMaxKey}}{{else}}1024{{end}}" placeholder="e.g. user:1" required>
+          </div>
+          <div class="field">
+            <label for="value">Value <span class="hint">(used by Put)</span></label>
+            <textarea id="value" name="value" rows="3" spellcheck="false" placeholder="e.g. alice"{{if .DemoEnabled}} maxlength="{{.DemoMaxValue}}"{{end}}></textarea>
+          </div>
+          <div class="actions">
+            <button type="submit" class="btn btn-put" data-op="put">Put</button>
+            <button type="submit" class="btn btn-get" data-op="get">Get</button>
+            <button type="submit" class="btn btn-del" data-op="delete">Delete</button>
+            <button type="submit" class="btn btn-ghost-dark" data-op="stats">Stats</button>
+          </div>
+          <details class="owner"{{if not .DemoEnabled}} open{{end}}>
+            <summary>{{if .DemoEnabled}}Owner access (optional){{else}}Access token{{end}}</summary>
+            <div class="field">
+              <label for="token">Access token</label>
+              <input id="token" name="token" type="password" autocomplete="off" spellcheck="false">
+            </div>
+          </details>
+          {{if .DemoEnabled}}
+          <p class="fine">Limits: keys {{.DemoMaxKey}} B, values {{.DemoMaxValue}} B, {{.DemoPerMinute}} requests/min. Anyone who guesses a key can read it, so do not enter personal information. The sandbox resets when the server restarts.</p>
+          {{end}}
+        </form>
+
+        <div class="terminal" aria-labelledby="result-label">
+          <div class="terminal-bar" aria-hidden="true"><span></span><span></span><span></span></div>
+          <h3 id="result-label" class="visually-hidden">Response</h3>
+          <pre id="result" class="result" aria-live="polite" tabindex="0"><span class="muted">$ waiting for your first request...
+  1. pick a quick-start example (or type a key and value)
+  2. press Put, then Get
+  3. press Delete, then Get again to see the tombstone win</span></pre>
+          <ol id="history" class="history" aria-label="Recent requests"></ol>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap" aria-labelledby="how">
+    <div class="section-head">
+      <h2 id="how">How a write flows</h2>
+      <p class="muted">What happened when you pressed Put.</p>
+    </div>
+    <ol class="flow">
+      <li class="step"><span class="num" aria-hidden="true">1</span><h3>Sequence number</h3><p>The write gets a unique, increasing 56-bit sequence number. Keys are stored as <code>(key, seq, kind)</code> and sorted newest-first, so a lookup stops at the first match.</p></li>
+      <li class="step"><span class="num" aria-hidden="true">2</span><h3>Write-ahead log</h3><p>The record is framed with a CRC-32C checksum and appended to the log. With group commit, one <code>fsync</code> covers every writer waiting at that moment.</p></li>
+      <li class="step"><span class="num" aria-hidden="true">3</span><h3>Memtable</h3><p>The entry goes into a skip list (p = 1/4, height 12) behind a read-write lock. Deletes become tombstones that shadow older versions.</p></li>
+      <li class="step"><span class="num" aria-hidden="true">4</span><h3>Publish</h3><p>Readers see the write only after it is durable, so a crash can never undo a value someone has already read.</p></li>
+      <li class="step"><span class="num" aria-hidden="true">5</span><h3>Recovery</h3><p>On restart the log is replayed. A torn final record is trimmed; corruption mid-log stops startup instead of silently losing data.</p></li>
     </ol>
-    <p>Verified by a crash test that kills the process at random moments mid-write and checks that no acknowledged write was lost. SSTables, bloom filters and compaction are next on the roadmap.</p>
   </section>
 
-  <section aria-labelledby="api">
-    <h2 id="api">HTTP API</h2>
-    <p>All <code>/v1</code> routes require <code>Authorization: Bearer &lt;token&gt;</code>.</p>
-    <table>
-      <caption class="visually-hidden">API routes</caption>
-      <thead><tr><th scope="col">Method</th><th scope="col">Path</th><th scope="col">Result</th></tr></thead>
-      <tbody>
-        <tr><td><code>PUT</code></td><td><code>/v1/kv/{key}</code></td><td>Body is the value. <code>204</code></td></tr>
-        <tr><td><code>GET</code></td><td><code>/v1/kv/{key}</code></td><td><code>200</code> with the value, or <code>404</code></td></tr>
-        <tr><td><code>DELETE</code></td><td><code>/v1/kv/{key}</code></td><td><code>204</code></td></tr>
-        <tr><td><code>GET</code></td><td><code>/v1/stats</code></td><td>Engine statistics as JSON</td></tr>
-        <tr><td><code>GET</code></td><td><code>/healthz</code></td><td><code>ok</code> (no auth)</td></tr>
-      </tbody>
-    </table>
-    <pre><code>curl -X PUT -H "Authorization: Bearer $TOKEN" --data 'alice' https://&lt;host&gt;/v1/kv/user:1
-curl -H "Authorization: Bearer $TOKEN" https://&lt;host&gt;/v1/kv/user:1</code></pre>
-    {{if .DemoEnabled}}
-    <p>Public sandbox, no token needed (rate-limited, keys stored under <code>{{.DemoPrefix}}</code>):</p>
-    <pre><code>curl -X PUT --data 'hello' https://&lt;host&gt;/v1/demo/kv/greeting
+  <section class="wrap" aria-labelledby="eng">
+    <div class="section-head">
+      <h2 id="eng">Engineering highlights</h2>
+    </div>
+    <ul class="features">
+      <li class="feature"><h3>Crash-tested</h3><p>A test kills the process at random moments mid-write, restarts it, and checks that no acknowledged write was lost, for every fsync policy.</p></li>
+      <li class="feature"><h3>Group commit</h3><p>Concurrent writers share one fsync. In tests, 200 sync requests needed only 38 fsyncs.</p></li>
+      <li class="feature"><h3>fsyncgate-safe</h3><p>A failed fsync makes the log refuse further writes, instead of retrying into silent data loss.</p></li>
+      <li class="feature"><h3>Torn-write recovery</h3><p>Tested at every possible crash byte offset: complete records are kept, the torn tail is trimmed.</p></li>
+      <li class="feature"><h3>Race-free</h3><p>Every test runs under Go's race detector in CI, on every push.</p></li>
+      <li class="feature"><h3>Hardened server</h3><p>Constant-time token checks, size limits, timeouts, rate-limited sandbox, and logs that never contain keys.</p></li>
+    </ul>
+  </section>
+
+  <section class="wrap" aria-labelledby="api">
+    <div class="section-head">
+      <h2 id="api">HTTP API</h2>
+      <p class="muted">Owner routes need <code>Authorization: Bearer &lt;token&gt;</code>.{{if .DemoEnabled}} Sandbox routes are open and rate limited.{{end}}</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <caption class="visually-hidden">API routes</caption>
+        <thead><tr><th scope="col">Method</th><th scope="col">Path</th><th scope="col">Result</th><th scope="col">Auth</th></tr></thead>
+        <tbody>
+          <tr><td><span class="m m-put">PUT</span></td><td><code>/v1/kv/{key}</code></td><td>Store body as value, <code>204</code></td><td>token</td></tr>
+          <tr><td><span class="m m-get">GET</span></td><td><code>/v1/kv/{key}</code></td><td>Value, or <code>404</code></td><td>token</td></tr>
+          <tr><td><span class="m m-del">DELETE</span></td><td><code>/v1/kv/{key}</code></td><td>Write tombstone, <code>204</code></td><td>token</td></tr>
+          <tr><td><span class="m m-get">GET</span></td><td><code>/v1/stats</code></td><td>Engine stats (JSON)</td><td>token</td></tr>
+          {{if .DemoEnabled}}
+          <tr><td><span class="m m-any">ANY</span></td><td><code>/v1/demo/kv/{key}</code></td><td>Same as above, under <code>{{.DemoPrefix}}</code></td><td>none</td></tr>
+          <tr><td><span class="m m-get">GET</span></td><td><code>/v1/demo/stats</code></td><td>Stats + sandbox budget</td><td>none</td></tr>
+          {{end}}
+          <tr><td><span class="m m-get">GET</span></td><td><code>/stats.json</code></td><td>Public aggregate counters</td><td>none</td></tr>
+          <tr><td><span class="m m-get">GET</span></td><td><code>/healthz</code></td><td><code>ok</code></td><td>none</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <pre class="code"><code>{{if .DemoEnabled}}# public sandbox, no token
+curl -X PUT --data 'hello' https://&lt;host&gt;/v1/demo/kv/greeting
 curl https://&lt;host&gt;/v1/demo/kv/greeting
-curl https://&lt;host&gt;/v1/demo/stats</code></pre>
-    {{end}}
+
+{{end}}# owner API
+curl -X PUT -H "Authorization: Bearer $TOKEN" --data 'alice' https://&lt;host&gt;/v1/kv/user:1
+curl -H "Authorization: Bearer $TOKEN" https://&lt;host&gt;/v1/kv/user:1</code></pre>
   </section>
 
-  <section aria-labelledby="try">
-    <h2 id="try">Try it</h2>
-    {{if .DemoEnabled}}
-    <p>Leave the token empty to use the <strong>public demo sandbox</strong>: no sign-up, real engine, real write-ahead log. Your keys are stored under <code>{{.DemoPrefix}}</code>, so the sandbox is isolated from everything else.</p>
-    <p class="note">Sandbox limits: keys up to {{.DemoMaxKey}} bytes, values up to {{.DemoMaxValue}} bytes, {{.DemoPerMinute}} requests per minute. Anything you write is visible to other visitors who guess the key, so do not enter personal information. The sandbox resets when the server restarts.</p>
-    {{else}}
-    <p class="note">Requires the access token for this instance. The token stays in this browser tab and is sent only to this server.</p>
-    {{end}}
-    <form id="kv" novalidate data-demo="{{if .DemoEnabled}}on{{else}}off{{end}}">
-      <div class="field">
-        <label for="token">Access token{{if .DemoEnabled}} <span class="hint">(optional; owner only)</span>{{end}}</label>
-        <input id="token" name="token" type="password" autocomplete="off" spellcheck="false"{{if not .DemoEnabled}} required{{end}}>
-      </div>
-      <div class="field">
-        <label for="key">Key</label>
-        <input id="key" name="key" type="text" autocomplete="off" spellcheck="false" maxlength="{{if .DemoEnabled}}{{.DemoMaxKey}}{{else}}1024{{end}}" placeholder="user:1" required>
-      </div>
-      <div class="field">
-        <label for="value">Value <span class="hint">(for Put)</span></label>
-        <textarea id="value" name="value" rows="3" spellcheck="false" placeholder="alice"{{if .DemoEnabled}} maxlength="{{.DemoMaxValue}}"{{end}}></textarea>
-      </div>
-      <div class="actions">
-        <button type="submit" data-op="get">Get</button>
-        <button type="submit" data-op="put">Put</button>
-        <button type="submit" data-op="delete" class="secondary">Delete</button>
-        <button type="submit" data-op="stats" class="secondary">Stats</button>
-      </div>
-    </form>
-    <h3 id="result-label">Response</h3>
-    <pre id="result" class="result" aria-labelledby="result-label" aria-live="polite" tabindex="0">No request yet.</pre>
+  <section class="wrap" aria-labelledby="roadmap">
+    <div class="section-head">
+      <h2 id="roadmap">Roadmap</h2>
+    </div>
+    <ol class="roadmap">
+      <li class="done"><span class="tag">Done</span> Skip-list memtable, sequence numbers, tombstones</li>
+      <li class="done"><span class="tag">Done</span> Write-ahead log, group commit, crash recovery</li>
+      <li class="done"><span class="tag">Done</span> HTTP server, Docker image, live deployment</li>
+      <li><span class="tag">Next</span> SSTables and background flush</li>
+      <li><span class="tag">Planned</span> Bloom filters, MANIFEST, merged read path</li>
+      <li><span class="tag">Planned</span> Size-tiered compaction (k-way merge)</li>
+      <li><span class="tag">Planned</span> Benchmarks from real measurements</li>
+      <li><span class="tag">Phase 2</span> Raft replication: a distributed KV store</li>
+    </ol>
   </section>
 </main>
 
-<footer>
+<footer class="footer">
   <div class="wrap">
-    <p>Single-node instance. On the free hosting tier, data resets when the service restarts. <a href="{{.RepoURL}}">Read the design notes</a>.</p>
+    <p>Single-node instance on a free hosting tier: data resets when the service restarts, and the first request after idle can take a while.</p>
+    <p><a href="{{.RepoURL}}">Source and design notes on GitHub</a></p>
   </div>
 </footer>
 <script src="/static/app.js"></script>
