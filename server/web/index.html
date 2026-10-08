@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LSM-engine: a key-value storage engine in Go</title>
+<meta name="description" content="A log-structured merge-tree key-value storage engine written from scratch in Go, with a write-ahead log, group commit and crash recovery.">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header>
+  <div class="wrap">
+    <h1>LSM-engine</h1>
+    <p class="tagline">A log-structured merge-tree key-value storage engine, written from scratch in Go using only the standard library.</p>
+    <p><a class="button" href="{{.RepoURL}}">Source code on GitHub</a> <span class="status" role="status"><span class="dot" aria-hidden="true"></span> Online</span></p>
+  </div>
+</header>
+
+<main id="main" class="wrap">
+  <section aria-labelledby="live">
+    <h2 id="live">Live engine stats</h2>
+    <p class="note">Read from this running instance when the page loaded. Aggregate counters only; no keys or values are shown.</p>
+    <dl class="stats">
+      <div><dt>Entries in memtable</dt><dd>{{.Entries}}</dd></div>
+      <div><dt>Last sequence number</dt><dd>{{.LastSeq}}</dd></div>
+      <div><dt>Write-ahead log size</dt><dd>{{.WALBytes}} bytes</dd></div>
+      <div><dt>Memtable memory</dt><dd>{{.MemtableBytes}} / {{.MaxMemtable}} bytes</dd></div>
+      <div><dt>fsync policy</dt><dd>{{.SyncPolicy}}</dd></div>
+      <div><dt>Uptime</dt><dd>{{.Uptime}}</dd></div>
+    </dl>
+  </section>
+
+  <section aria-labelledby="how">
+    <h2 id="how">How a write flows</h2>
+    <ol>
+      <li><strong>Sequence number.</strong> Each write gets a unique, increasing 56-bit sequence number. Keys are stored as <code>(user key, seq, kind)</code>, sorted newest-first, so a lookup stops at the first match.</li>
+      <li><strong>Write-ahead log.</strong> The record is framed with a CRC-32C checksum and appended to the log. With group commit, one <code>fsync</code> is shared by every writer waiting at the same time.</li>
+      <li><strong>Memtable.</strong> The write is inserted into a skip list (p = 1/4, max height 12) guarded by a read-write lock. Deletes are tombstones, not removals.</li>
+      <li><strong>Publish.</strong> Readers only see the write after it is durable, so a crash can never undo a value someone already read.</li>
+      <li><strong>Recovery.</strong> On restart the log is replayed. A torn final record is truncated; corruption in the middle stops startup instead of silently losing data.</li>
+    </ol>
+    <p>Verified by a crash test that kills the process at random moments mid-write and checks that no acknowledged write was lost. SSTables, bloom filters and compaction are next on the roadmap.</p>
+  </section>
+
+  <section aria-labelledby="api">
+    <h2 id="api">HTTP API</h2>
+    <p>All <code>/v1</code> routes require <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+    <table>
+      <caption class="visually-hidden">API routes</caption>
+      <thead><tr><th scope="col">Method</th><th scope="col">Path</th><th scope="col">Result</th></tr></thead>
+      <tbody>
+        <tr><td><code>PUT</code></td><td><code>/v1/kv/{key}</code></td><td>Body is the value. <code>204</code></td></tr>
+        <tr><td><code>GET</code></td><td><code>/v1/kv/{key}</code></td><td><code>200</code> with the value, or <code>404</code></td></tr>
+        <tr><td><code>DELETE</code></td><td><code>/v1/kv/{key}</code></td><td><code>204</code></td></tr>
+        <tr><td><code>GET</code></td><td><code>/v1/stats</code></td><td>Engine statistics as JSON</td></tr>
+        <tr><td><code>GET</code></td><td><code>/healthz</code></td><td><code>ok</code> (no auth)</td></tr>
+      </tbody>
+    </table>
+    <pre><code>curl -X PUT -H "Authorization: Bearer $TOKEN" --data 'alice' https://&lt;host&gt;/v1/kv/user:1
+curl -H "Authorization: Bearer $TOKEN" https://&lt;host&gt;/v1/kv/user:1</code></pre>
+  </section>
+
+  <section aria-labelledby="try">
+    <h2 id="try">Try it</h2>
+    <p class="note">Requires the access token for this instance. The token stays in this browser tab and is sent only to this server.</p>
+    <form id="kv" novalidate>
+      <div class="field">
+        <label for="token">Access token</label>
+        <input id="token" name="token" type="password" autocomplete="off" spellcheck="false" required>
+      </div>
+      <div class="field">
+        <label for="key">Key</label>
+        <input id="key" name="key" type="text" autocomplete="off" spellcheck="false" maxlength="1024" placeholder="user:1" required>
+      </div>
+      <div class="field">
+        <label for="value">Value <span class="hint">(for Put)</span></label>
+        <textarea id="value" name="value" rows="3" spellcheck="false" placeholder="alice"></textarea>
+      </div>
+      <div class="actions">
+        <button type="submit" data-op="get">Get</button>
+        <button type="submit" data-op="put">Put</button>
+        <button type="submit" data-op="delete" class="secondary">Delete</button>
+        <button type="submit" data-op="stats" class="secondary">Stats</button>
+      </div>
+    </form>
+    <h3 id="result-label">Response</h3>
+    <pre id="result" class="result" aria-labelledby="result-label" aria-live="polite" tabindex="0">No request yet.</pre>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>Single-node instance. On the free hosting tier, data resets when the service restarts. <a href="{{.RepoURL}}">Read the design notes</a>.</p>
+  </div>
+</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -7,6 +7,8 @@
 //	DELETE /v1/kv/{key}                        -> 204 (also for missing keys)
 //	GET    /v1/stats                           -> 200 JSON
 //	GET    /healthz                            -> 200 "ok" (no auth, for load balancers)
+//	GET    /                                   -> public landing page (no auth;
+//	                                              aggregate stats only, never keys)
 //
 // Keys are the rest of the path after /v1/kv/, percent-decoded, so they may
 // contain slashes. Values are raw bytes (application/octet-stream).
@@ -54,6 +56,7 @@ type handler struct {
 	maxKey    int
 	maxValue  int64
 	log       *slog.Logger
+	started   time.Time
 }
 
 // New returns the HTTP handler for d.
@@ -78,9 +81,12 @@ func New(d *db.DB, cfg Config) (http.Handler, error) {
 		maxKey:    cfg.MaxKeyBytes,
 		maxValue:  cfg.MaxValueBytes,
 		log:       cfg.Logger,
+		started:   time.Now(),
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", h.index)
+	mux.Handle("GET /static/", h.static())
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.Handle("GET /v1/kv/{key...}", h.auth(h.get))
 	mux.Handle("PUT /v1/kv/{key...}", h.auth(h.put))
