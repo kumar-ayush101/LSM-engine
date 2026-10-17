@@ -64,6 +64,13 @@ type indexData struct {
 	DemoMaxKey    int
 	DemoMaxValue  int64
 	DemoPerMinute int
+
+	// Cluster is set when the server runs in replicated (Raft) mode.
+	ClusterEnabled bool
+	ClusterRole    string
+	ClusterLeader  string
+	ClusterNodeID  string
+	ClusterPeers   int
 }
 
 // index renders the public landing page. It shows aggregate counters only
@@ -94,6 +101,14 @@ func (h *handler) index(w http.ResponseWriter, r *http.Request) {
 		data.DemoMaxValue = h.demo.cfg.MaxValueBytes
 		data.DemoPerMinute = h.demo.cfg.PerIPPerMinute
 	}
+	if h.cluster != nil {
+		cs := h.cluster.Status()
+		data.ClusterEnabled = true
+		data.ClusterRole = cs.Role
+		data.ClusterLeader = cs.LeaderID
+		data.ClusterNodeID = cs.ID
+		data.ClusterPeers = cs.Peers
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	setPageSecurityHeaders(w)
@@ -123,6 +138,15 @@ type PublicStats struct {
 	DemoEnabled        bool    `json:"demo_enabled"`
 	DemoBytesUsed      int64   `json:"demo_bytes_used,omitempty"`
 	DemoBytesLimit     int64   `json:"demo_bytes_limit,omitempty"`
+
+	// Cluster fields are present only in replicated mode.
+	ClusterEnabled bool   `json:"cluster_enabled"`
+	ClusterRole    string `json:"cluster_role,omitempty"`
+	ClusterNodeID  string `json:"cluster_node_id,omitempty"`
+	ClusterLeader  string `json:"cluster_leader,omitempty"`
+	ClusterTerm    uint64 `json:"cluster_term,omitempty"`
+	ClusterCommit  uint64 `json:"cluster_commit_index,omitempty"`
+	ClusterPeers   int    `json:"cluster_peers,omitempty"`
 }
 
 func (h *handler) publicStats(w http.ResponseWriter, r *http.Request) {
@@ -147,6 +171,16 @@ func (h *handler) publicStats(w http.ResponseWriter, r *http.Request) {
 		ps.DemoEnabled = true
 		ps.DemoBytesUsed = h.demo.used.Load()
 		ps.DemoBytesLimit = h.demo.cfg.MaxTotalBytes
+	}
+	if h.cluster != nil {
+		cs := h.cluster.Status()
+		ps.ClusterEnabled = true
+		ps.ClusterRole = cs.Role
+		ps.ClusterNodeID = cs.ID
+		ps.ClusterLeader = cs.LeaderID
+		ps.ClusterTerm = cs.Term
+		ps.ClusterCommit = cs.CommitIndex
+		ps.ClusterPeers = cs.Peers
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

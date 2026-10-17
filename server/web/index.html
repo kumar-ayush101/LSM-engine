@@ -24,7 +24,7 @@
   <div class="wrap hero-body">
     <p class="eyebrow"><span class="pulse" aria-hidden="true"></span> Running live <span class="sep" aria-hidden="true">&middot;</span> up <span data-stat="uptime">{{.Uptime}}</span></p>
     <h1>A storage engine,<br><span class="grad">built from scratch.</span></h1>
-    <p class="lead">A log-structured merge-tree key-value store in Go, using only the standard library: write-ahead log, skip-list memtable, SSTables with bloom filters, a MANIFEST, and size-tiered compaction. Every write is checksummed and fsynced before it is acknowledged, and survives a hard crash.</p>
+    <p class="lead">A log-structured merge-tree key-value store in Go, using only the standard library: write-ahead log, skip-list memtable, SSTables with bloom filters, a MANIFEST, size-tiered compaction, and <strong>Raft replication</strong> for a fault-tolerant, distributed cluster. Every write is checksummed and fsynced before it is acknowledged, and survives a hard crash.</p>
     <div class="cta">
       <a class="btn btn-primary" href="#try">Try the live demo</a>
       <a class="btn btn-ghost" href="{{.RepoURL}}">View source on GitHub</a>
@@ -35,6 +35,7 @@
       <li>Group commit</li>
       <li>SSTables + bloom filters</li>
       <li>Size-tiered compaction</li>
+      <li>Raft replication</li>
       <li>Crash-tested</li>
     </ul>
   </div>
@@ -62,6 +63,29 @@
       </div>
     </dl>
   </section>
+
+  {{if .ClusterEnabled}}
+  <section class="wrap cluster-section" aria-labelledby="cluster" data-cluster="on" data-node-id="{{.ClusterNodeID}}">
+    <div class="section-head">
+      <h2 id="cluster">Live cluster <span class="badge badge-raft">Raft</span></h2>
+      <p class="muted"><span class="pulse" aria-hidden="true"></span> This node is <strong data-cluster="role">{{.ClusterRole}}</strong> &middot; leader <strong data-cluster="leader">{{.ClusterLeader}}</strong> &middot; <span data-cluster="peers">{{.ClusterPeers}}</span> members. Writes replicate to a majority before they are acknowledged.</p>
+    </div>
+    <div class="cluster">
+      <div class="cluster-ring" data-cluster="ring" aria-label="Cluster nodes" role="img">
+        <!-- node tiles injected by app.js -->
+      </div>
+      <dl class="cluster-facts">
+        <div><dt>Node</dt><dd data-cluster="node">{{.ClusterNodeID}}</dd></div>
+        <div><dt>Role</dt><dd><span class="role-pill" data-cluster="rolepill">{{.ClusterRole}}</span></dd></div>
+        <div><dt>Term</dt><dd data-cluster="term">&ndash;</dd></div>
+        <div><dt>Commit index</dt><dd data-cluster="commit">&ndash;</dd></div>
+        <div><dt>Leader</dt><dd data-cluster="leaderid">{{.ClusterLeader}}</dd></div>
+        <div><dt>Members</dt><dd data-cluster="members">{{.ClusterPeers}}</dd></div>
+      </dl>
+    </div>
+    <p class="fine">Reads are served locally from this node. Writes are proposed to the leader, replicated through the Raft log, and acknowledged once a majority has stored them &mdash; so the cluster keeps serving through the loss of a minority of nodes.</p>
+  </section>
+  {{end}}
 
   <section class="band" aria-labelledby="try">
     <div class="wrap">
@@ -153,6 +177,8 @@
       <li class="feature"><h3>Bloom filters</h3><p>Sized by m = -n ln p / (ln 2)&sup2;. Lookups for absent keys skip about 99% of table reads.</p></li>
       <li class="feature"><h3>Crash-safe compaction</h3><p>Every flush and merge commits through a fsynced MANIFEST edit; the crash test kills the process mid-flush and mid-compaction too.</p></li>
       <li class="feature"><h3>Race-free</h3><p>Every test runs under Go's race detector in CI, on every push.</p></li>
+      <li class="feature"><h3>Raft replication</h3><p>A from-scratch Raft implementation (stdlib only) replicates every write to a majority before acknowledging it: leader election, log replication, and crash-safe persistent state.</p></li>
+      <li class="feature"><h3>Fault-tolerant</h3><p>A three-node cluster survives the loss of any one node. Tests kill the leader mid-flight and confirm a new leader is elected and data is preserved.</p></li>
       <li class="feature"><h3>Hardened server</h3><p>Constant-time token checks, size limits, timeouts, rate-limited sandbox, and logs that never contain keys.</p></li>
     </ul>
   </section>
@@ -173,6 +199,9 @@
           <tr><td><span class="m m-get">GET</span></td><td><code>/v1/stats</code></td><td>Engine stats (JSON)</td><td>token</td></tr>
           <tr><td><span class="m m-get">GET</span></td><td><code>/v1/scan?prefix=&amp;start=&amp;end=&amp;limit=</code></td><td>Ordered range scan, paged</td><td>token</td></tr>
           <tr><td><span class="m m-put">POST</span></td><td><code>/v1/admin/flush</code>, <code>/v1/admin/compact</code></td><td>Force a flush or a full compaction</td><td>token</td></tr>
+          {{if .ClusterEnabled}}
+          <tr><td><span class="m m-get">GET</span></td><td><code>/v1/cluster</code></td><td>Raft role, term, leader, commit index</td><td>token</td></tr>
+          {{end}}
           {{if .DemoEnabled}}
           <tr><td><span class="m m-any">ANY</span></td><td><code>/v1/demo/kv/{key}</code></td><td>Same as above, under <code>{{.DemoPrefix}}</code></td><td>none</td></tr>
           <tr><td><span class="m m-get">GET</span></td><td><code>/v1/demo/stats</code></td><td>Stats + sandbox budget</td><td>none</td></tr>
@@ -204,15 +233,20 @@ curl -H "Authorization: Bearer $TOKEN" https://&lt;host&gt;/v1/kv/user:1</code><
       <li class="done"><span class="tag">Done</span> Bloom filters, MANIFEST, merged read path, range scans</li>
       <li class="done"><span class="tag">Done</span> Size-tiered compaction (k-way merge)</li>
       <li class="done"><span class="tag">Done</span> Benchmark harness with measured results</li>
+      <li class="done"><span class="tag tag-phase2">Phase 2</span> Raft replication: a distributed, fault-tolerant KV store</li>
       <li><span class="tag">Stretch</span> Leveled compaction, block cache, compression</li>
-      <li><span class="tag">Phase 2</span> Raft replication: a distributed KV store</li>
+      <li><span class="tag">Next</span> Dynamic cluster membership, snapshots, log compaction</li>
     </ol>
   </section>
 </main>
 
 <footer class="footer">
   <div class="wrap">
+    {{if .ClusterEnabled}}
+    <p>Replicated cluster node <strong>{{.ClusterNodeID}}</strong>. Writes go through Raft and survive the loss of a minority of nodes.</p>
+    {{else}}
     <p>Single-node instance on a free hosting tier: data resets when the service restarts, and the first request after idle can take a while.</p>
+    {{end}}
     <p><a href="{{.RepoURL}}">Source and design notes on GitHub</a></p>
   </div>
 </footer>

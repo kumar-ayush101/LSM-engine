@@ -224,3 +224,55 @@ pre.code { margin: 1rem 0 0; padding: 1.1rem 1.25rem; overflow-x: auto; backgrou
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 .actions-2 { grid-template-columns: 1fr; margin-top: .5rem; }
+
+/* ---------- cluster topology ---------- */
+.cluster-section { position: relative; }
+.badge { display: inline-block; vertical-align: middle; margin-left: .5rem; padding: .15rem .55rem; border-radius: 999px; font-size: .7rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.badge-raft { background: linear-gradient(135deg, #6366f1, #06b6d4); color: #fff; }
+.tag-phase2 { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+
+.cluster { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 1.25rem; align-items: stretch; }
+.cluster-ring {
+  position: relative; min-height: 20rem; padding: 1.5rem;
+  background:
+    radial-gradient(40rem 20rem at 50% 40%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 70%),
+    var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
+  display: flex; align-items: center; justify-content: center; gap: 1rem; flex-wrap: wrap;
+}
+.node-tile {
+  position: relative; width: 9rem; padding: 1rem 1.1rem; border-radius: 12px;
+  background: var(--bg); border: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: .35rem;
+  transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
+}
+.node-tile.leader { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent), var(--shadow); transform: translateY(-3px); }
+.node-tile.self::after { content: "this node"; position: absolute; top: -.6rem; right: .6rem; font-size: .62rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--accent-2); background: var(--surface); padding: 0 .35rem; border-radius: 5px; }
+.node-tile.down { opacity: .5; filter: grayscale(.6); }
+.node-head { display: flex; align-items: center; gap: .5rem; }
+.node-dot { width: .7rem; height: .7rem; border-radius: 50%; background: #94a3b8; flex: none; }
+.node-tile.leader .node-dot { background: var(--accent); box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 60%, transparent); animation: pulse 2s infinite; }
+.node-tile.follower .node-dot { background: #22c55e; }
+.node-tile.candidate .node-dot { background: #f59e0b; }
+.node-id { font-weight: 700; font-variant-numeric: tabular-nums; }
+.node-role { font-size: .78rem; color: var(--muted); text-transform: capitalize; }
+.node-meta { font-size: .72rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.cluster-facts { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; align-content: start;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 1.25rem; }
+.cluster-facts > div { display: flex; flex-direction: column; gap: .2rem; }
+.cluster-facts dt { color: var(--muted); font-size: .8rem; font-weight: 500; }
+.cluster-facts dd { margin: 0; font-size: 1.2rem; font-weight: 700; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.role-pill { display: inline-block; padding: .1rem .55rem; border-radius: 999px; font-size: .82rem; font-weight: 700; text-transform: capitalize; background: color-mix(in srgb, var(--muted) 15%, transparent); color: var(--muted); }
+.role-pill.leader { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+.role-pill.follower { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.role-pill.candidate { background: color-mix(in srgb, #f59e0b 20%, transparent); color: #b45309; }
+@media (prefers-color-scheme: dark) { .role-pill.candidate { color: #fbbf24; } }
+
+@media (max-width: 960px) {
+  .cluster { grid-template-columns: 1fr; }
+}
+@media (max-width: 600px) {
+  .cluster-facts { grid-template-columns: 1fr 1fr; }
+  .node-tile { width: 7.5rem; }
+}

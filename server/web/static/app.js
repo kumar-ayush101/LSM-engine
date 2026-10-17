@@ -71,7 +71,96 @@
       var up = stat("uptime");
       if (up) up.textContent = humanDuration(s.uptime_seconds);
       setMeter(s.memtable_bytes, s.memtable_limit);
+      if (s.cluster_enabled) updateCluster(s);
     } catch (e) { /* offline or waking up; try again next tick */ }
+  }
+
+  // ---------- cluster view ----------
+  function clusterEl(name) { return document.querySelector('[data-cluster="' + name + '"]'); }
+
+  function updateCluster(s) {
+    var section = document.querySelector('[data-cluster="on"]');
+    if (!section) return;
+    var role = s.cluster_role || "follower";
+    var leader = s.cluster_leader || "";
+    var self = section.dataset.nodeId || s.cluster_node_id || "";
+    var members = (s.cluster_peers || 0) + 1; // peers + this node
+
+    setText(clusterEl("role"), role);
+    setText(clusterEl("leader"), leader || "(electing)");
+    setText(clusterEl("leaderid"), leader || "(electing)");
+    setText(clusterEl("peers"), String(members));
+    setText(clusterEl("members"), String(members));
+    setText(clusterEl("term"), String(s.cluster_term != null ? s.cluster_term : "\u2013"));
+    setText(clusterEl("commit"), String(s.cluster_commit != null ? s.cluster_commit : "\u2013"));
+    setText(clusterEl("node"), self);
+
+    var pill = clusterEl("rolepill");
+    if (pill) {
+      pill.textContent = role;
+      pill.className = "role-pill " + role;
+    }
+
+    renderRing(section, self, role, leader, members);
+  }
+
+  // renderRing draws one tile for this node (whose role we know exactly) plus
+  // placeholder tiles for the other members. We know the leader's ID, so the
+  // leader tile is marked precisely; the remaining peers are shown as
+  // followers (their exact live role is only known on their own page).
+  function renderRing(section, self, role, leader, members) {
+    var ring = clusterEl("ring");
+    if (!ring) return;
+    var ids = [self];
+    // Derive peer IDs if present in the leader hint; otherwise synthesize
+    // stable labels so the count is always right.
+    if (leader && leader !== self && ids.indexOf(leader) === -1) ids.push(leader);
+    var n = 1;
+    while (ids.length < members) {
+      var label = "node " + (ids.length + 1);
+      ids.push(label);
+      n++;
+    }
+
+    var sig = ids.join("|") + "#" + role + "#" + leader;
+    if (ring.dataset.sig === sig) return; // no change, avoid re-render churn
+    ring.dataset.sig = sig;
+
+    ring.textContent = "";
+    ids.forEach(function (id) {
+      var isSelf = id === self;
+      var isLeader = id === leader || (isSelf && role === "leader");
+      var tileRole = isLeader ? "leader" : (isSelf ? role : "follower");
+      ring.appendChild(nodeTile(id, tileRole, isSelf));
+    });
+  }
+
+  function nodeTile(id, role, isSelf) {
+    var tile = document.createElement("div");
+    tile.className = "node-tile " + role + (isSelf ? " self" : "");
+    var head = document.createElement("div");
+    head.className = "node-head";
+    var dot = document.createElement("span");
+    dot.className = "node-dot";
+    var idEl = document.createElement("span");
+    idEl.className = "node-id";
+    idEl.textContent = id;
+    head.appendChild(dot);
+    head.appendChild(idEl);
+    var roleEl = document.createElement("div");
+    roleEl.className = "node-role";
+    roleEl.textContent = role;
+    var meta = document.createElement("div");
+    meta.className = "node-meta";
+    meta.textContent = role === "leader" ? "accepts writes" : "replicates + reads";
+    tile.appendChild(head);
+    tile.appendChild(roleEl);
+    tile.appendChild(meta);
+    return tile;
+  }
+
+  function setText(el, text) {
+    if (el && el.textContent !== text) el.textContent = text;
   }
 
   refreshStats();

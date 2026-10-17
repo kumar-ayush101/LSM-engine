@@ -55,7 +55,48 @@ type Config struct {
 	Logger *slog.Logger
 	// Demo configures the optional public sandbox. Disabled by default.
 	Demo DemoConfig
+	// Cluster, when set, routes writes through Raft replication: the leader
+	// accepts PUT/DELETE and replicates them; a follower returns 421 with the
+	// leader's address so the client can retry there. Reads are always served
+	// locally. When nil the server runs single-node (writes go straight to
+	// the db).
+	Cluster Replicator
 }
+
+// Replicator is the subset of a cluster node the server needs to replicate
+// writes and report cluster status. The cluster package's *cluster.Node
+// satisfies it.
+type Replicator interface {
+	// Put and Delete replicate a write; they return ErrNotLeader (wrapped)
+	// when this node is not the leader.
+	Put(key, value []byte) error
+	Delete(key []byte) error
+	// IsLeader reports whether this node is the current leader.
+	IsLeader() bool
+	// Leader returns the current leader's node ID and client-facing address
+	// hint (may be empty if unknown).
+	Leader() (id, addr string)
+	// Status returns the current cluster status for monitoring.
+	Status() ClusterStatus
+}
+
+// ClusterStatus is the replicated-cluster state surfaced on /v1/cluster and
+// the landing page. It carries no keys or values.
+type ClusterStatus struct {
+	ID          string `json:"id"`
+	Role        string `json:"role"`
+	Term        uint64 `json:"term"`
+	LeaderID    string `json:"leader_id"`
+	CommitIndex uint64 `json:"commit_index"`
+	LastApplied uint64 `json:"last_applied"`
+	LastLog     uint64 `json:"last_log_index"`
+	Peers       int    `json:"peers"`
+}
+
+// ErrNotLeader lets the server detect a non-leader write without importing
+// the cluster package. A Replicator should return an error that wraps this
+// (via errors.Is) when a write hits a follower.
+var ErrNotLeader = errors.New("server: not leader")
 
 const (
 	defaultMaxKeyBytes   = 1 << 10
@@ -64,6 +105,7 @@ const (
 
 type handler struct {
 	db        *db.DB
+	cluster   Replicator // nil in single-node mode
 	tokenHash [32]byte
 	maxKey    int
 	maxValue  int64
@@ -95,6 +137,7 @@ func New(d *db.DB, cfg Config) (http.Handler, error) {
 		maxValue:  cfg.MaxValueBytes,
 		log:       cfg.Logger,
 		started:   time.Now(),
+		cluster:   cfg.Cluster,
 	}
 
 	mux := http.NewServeMux()
@@ -109,6 +152,9 @@ func New(d *db.DB, cfg Config) (http.Handler, error) {
 	mux.Handle("GET /v1/scan", h.auth(h.ownerScan))
 	mux.Handle("POST /v1/admin/flush", h.auth(h.flush))
 	mux.Handle("POST /v1/admin/compact", h.auth(h.compact))
+	if cfg.Cluster != nil {
+		mux.Handle("GET /v1/cluster", h.auth(h.clusterStatus))
+	}
 	if cfg.Demo.Enabled {
 		h.demo = newDemo(cfg.Demo)
 		mux.Handle("GET /v1/demo/kv/{key...}", h.demoLimit(h.demoGet))
@@ -192,11 +238,69 @@ func (h *handler) put(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "reading body: "+err.Error())
 		return
 	}
-	if err := h.db.Put(k, v); err != nil {
-		h.dbError(w, err)
+	if err := h.writeKV(w, func() error { return h.doPut(k, v) }); err != nil {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// doPut performs a put through the cluster (replicated) or directly on the db
+// (single-node).
+func (h *handler) doPut(k, v []byte) error {
+	if h.cluster != nil {
+		return h.cluster.Put(k, v)
+	}
+	return h.db.Put(k, v)
+}
+
+func (h *handler) doDelete(k []byte) error {
+	if h.cluster != nil {
+		return h.cluster.Delete(k)
+	}
+	return h.db.Delete(k)
+}
+
+// writeKV runs a replicated/local write and maps a not-leader result to a 421
+// redirect carrying the leader's address. It returns a non-nil error if it
+// already wrote a response (so the caller should stop).
+func (h *handler) writeKV(w http.ResponseWriter, write func() error) error {
+	// In cluster mode, redirect followers before attempting the write so the
+	// client fails fast with the leader's address.
+	if h.cluster != nil && !h.cluster.IsLeader() {
+		h.redirectToLeader(w)
+		return errHandled
+	}
+	if err := write(); err != nil {
+		if errors.Is(err, ErrNotLeader) {
+			h.redirectToLeader(w)
+			return errHandled
+		}
+		h.dbError(w, err)
+		return errHandled
+	}
+	return nil
+}
+
+// errHandled signals that a response has already been written.
+var errHandled = errors.New("server: response already written")
+
+// redirectToLeader writes a 421 Misdirected Request with the leader's address
+// so a client or proxy can retry the write on the leader.
+func (h *handler) redirectToLeader(w http.ResponseWriter) {
+	id, addr := "", ""
+	if h.cluster != nil {
+		id, addr = h.cluster.Leader()
+	}
+	if addr != "" {
+		w.Header().Set("Location", addr)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusMisdirectedRequest) // 421
+	json.NewEncoder(w).Encode(map[string]string{
+		"error":     "not leader; retry on the leader",
+		"leader_id": id,
+		"leader":    addr,
+	})
 }
 
 func (h *handler) del(w http.ResponseWriter, r *http.Request) {
@@ -204,11 +308,17 @@ func (h *handler) del(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.db.Delete(k); err != nil {
-		h.dbError(w, err)
+	if err := h.writeKV(w, func() error { return h.doDelete(k) }); err != nil {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// clusterStatus reports the raft cluster state (role, term, leader, commit
+// index). Registered only when the server runs in cluster mode.
+func (h *handler) clusterStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(h.cluster.Status())
 }
 
 func (h *handler) stats(w http.ResponseWriter, r *http.Request) {

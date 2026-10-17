@@ -37,6 +37,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kumar-ayush101/LSM-engine/cluster"
 	"github.com/kumar-ayush101/LSM-engine/db"
 	"github.com/kumar-ayush101/LSM-engine/server"
 )
@@ -139,33 +140,87 @@ func run(ctx context.Context, args []string, getenv func(string) string, logger 
 	if err != nil {
 		return err
 	}
-
-	d, err := db.Open(cfg.dataDir, &db.Options{
-		Sync:             cfg.sync,
-		MaxMemtableBytes: cfg.maxMemtableMB << 20,
-		MemtableSize:     cfg.memtableMB << 20,
-	})
+	cc, err := parseClusterConfig(getenv)
 	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
+		return err
+	}
+
+	var (
+		d       *db.DB
+		repl    server.Replicator
+		cnode   *cluster.Node
+		raftSrv *http.Server
+	)
+
+	if cc.enabled {
+		hb, emin, emax, rpc := clusterTiming()
+		cnode, err = cluster.Open(cluster.Config{
+			ID:            cc.nodeID,
+			Peers:         cc.peers,
+			DataDir:       cfg.dataDir,
+			ClusterSecret: cc.secret,
+			DBOptions: &db.Options{
+				Sync:             cfg.sync,
+				MaxMemtableBytes: cfg.maxMemtableMB << 20,
+				MemtableSize:     cfg.memtableMB << 20,
+			},
+			HeartbeatInterval:  hb,
+			ElectionTimeoutMin: emin,
+			ElectionTimeoutMax: emax,
+			RPCTimeout:         rpc,
+			Logger:             logger,
+		})
+		if err != nil {
+			return fmt.Errorf("opening cluster node: %w", err)
+		}
+		d = cnode.DB()
+		repl = replicator{cnode}
+
+		// Serve raft peer RPCs on a SEPARATE internal listener.
+		raftLn, lerr := net.Listen("tcp", cc.raftAddr)
+		if lerr != nil {
+			cnode.Close()
+			return fmt.Errorf("raft listener: %w", lerr)
+		}
+		raftSrv = &http.Server{
+			Handler:           cnode.RaftHandler(),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+		}
+		logger.Info("raft peer listener", "addr", raftLn.Addr().String(), "node", cc.nodeID, "peers", len(cc.peers))
+		go func() { _ = raftSrv.Serve(raftLn) }()
+	} else {
+		d, err = db.Open(cfg.dataDir, &db.Options{
+			Sync:             cfg.sync,
+			MaxMemtableBytes: cfg.maxMemtableMB << 20,
+			MemtableSize:     cfg.memtableMB << 20,
+		})
+		if err != nil {
+			return fmt.Errorf("opening database: %w", err)
+		}
 	}
 	st := d.Stats()
 	logger.Info("database opened", "dir", cfg.dataDir, "sync", st.SyncPolicy,
-		"entries", st.Entries, "tables", st.Tables, "table_bytes", st.TableBytes, "last_seq", st.LastSeq)
+		"entries", st.Entries, "tables", st.Tables, "table_bytes", st.TableBytes, "last_seq", st.LastSeq,
+		"cluster", cc.enabled)
 
 	h, err := server.New(d, server.Config{
 		Token:         cfg.token,
 		MaxValueBytes: cfg.maxValueKB << 10,
 		Demo:          server.DemoConfig{Enabled: cfg.demo, TrustProxy: cfg.trustProxy},
 		Logger:        logger,
+		Cluster:       repl,
 	})
 	if err != nil {
-		d.Close()
+		closeEngine(cnode, d, cc.enabled)
 		return err
 	}
 
 	ln, err := net.Listen("tcp", cfg.addr)
 	if err != nil {
-		d.Close()
+		closeEngine(cnode, d, cc.enabled)
 		return err
 	}
 	srv := &http.Server{
@@ -192,6 +247,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, logger 
 		logger.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		err = srv.Shutdown(shutdownCtx)
+		if raftSrv != nil {
+			_ = raftSrv.Shutdown(shutdownCtx)
+		}
 		cancel()
 		<-serveErr
 	}
@@ -199,11 +257,23 @@ func run(ctx context.Context, args []string, getenv func(string) string, logger 
 		err = nil
 	}
 	// Close after the HTTP server so no handler is still writing.
-	if cerr := d.Close(); err == nil {
+	if cerr := closeEngine(cnode, d, cc.enabled); err == nil {
 		err = cerr
 	}
 	if err == nil {
 		logger.Info("stopped cleanly")
 	}
 	return err
+}
+
+// closeEngine closes the cluster node (which closes its db) in cluster mode,
+// or the bare db in single-node mode.
+func closeEngine(cnode *cluster.Node, d *db.DB, clustered bool) error {
+	if clustered {
+		if cnode != nil {
+			return cnode.Close()
+		}
+		return nil
+	}
+	return d.Close()
 }

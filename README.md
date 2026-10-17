@@ -23,6 +23,7 @@ files on disk, which are merged in the background.
 | W4 | Bloom filters, MANIFEST, merged read path, range scans | Done |
 | W5 | Size-tiered compaction (k-way min-heap merge, tombstone-safe drop rules) | Done |
 | W6 | Benchmark harness + measured results | Done |
+| P2 | **Raft replication** (own implementation): leader election, log replication, crash-safe state, distributed 3-node cluster | Done |
 
 Data is durable: every write goes to the WAL before it is acknowledged. A full memtable is flushed
 in the background to an immutable SSTable and committed in the MANIFEST, after which its WAL file is
@@ -418,8 +419,10 @@ attached volume. Requirements:
 
 - A persistent volume mounted at `/data`. Without it, data is lost whenever the container is
   replaced.
-- Exactly one instance per volume. This is a single-node engine; the directory lock rejects a
-  second process. Replication is Phase 2 (Raft).
+- Exactly one instance per volume. The directory lock rejects a second process sharing a data
+  directory. For high availability, run a **3-node Raft cluster** (see
+  [Phase 2: Raft replication](#phase-2-raft-replication-raft-cluster)) — each node gets its own
+  volume and the cluster survives the loss of any one node.
 - `LSM_AUTH_TOKEN` set as a platform secret, not baked into the image.
 - TLS in front (most platforms terminate HTTPS for you).
 - A health check on `GET /healthz`.
@@ -448,11 +451,118 @@ For durable data, use a paid instance with a disk mounted at `/data` and set `RU
 and a 20 s kill timeout so graceful shutdown can finish. Set the token with
 `fly secrets set LSM_AUTH_TOKEN=...` and deploy with `fly deploy --ha=false`.
 
+## Phase 2: Raft replication (`raft`, `cluster`)
+
+The single-node engine is durable but not available: if the node dies, writes stop and the data
+is only as safe as that one disk. Phase 2 adds **Raft** — implemented from scratch, Go standard
+library only (no etcd/raft, hashicorp/raft or any consensus library) — to replicate the engine
+across a small cluster. A three-node cluster keeps serving reads and writes through the loss of
+any one node, with no acknowledged write lost.
+
+Raft solves three sub-problems (Ongaro & Ousterhout, 2014):
+
+- **Leader election.** Nodes start as followers. A follower that hears nothing from a leader within
+  a randomized election timeout becomes a candidate, increments the term, votes for itself and
+  asks the others for votes (`RequestVote`). A candidate with a majority becomes leader and sends
+  heartbeats to suppress further elections. Randomized timeouts break split votes.
+- **Log replication.** The leader is the only node that accepts writes. It appends each command to
+  its log and ships it to the followers (`AppendEntries`). Once a **majority** has stored an entry
+  it is *committed*, and every node applies it to its local LSM db in log order. A follower whose
+  log diverges is backed up (using a conflict term/index hint, so it skips a whole term per round
+  trip) until the logs match, then overwritten.
+- **Safety.** A node grants its vote only to a candidate whose log is at least as up to date as its
+  own (the election restriction, §5.4.1), and a leader only advances the commit index over an entry
+  from its **own** term (§5.4.2). On winning, a leader commits a no-op from the new term so entries
+  inherited from earlier terms become committable. Together these guarantee a committed entry is
+  never lost or overwritten.
+
+### How a write flows in a cluster
+
+```
+client PUT ──▶ leader ──▶ raft.Propose(command)
+                      ├─▶ append to leader log, replicate via AppendEntries
+                      ├─▶ majority stores it  ──▶ committed
+                      ├─▶ every node applies Put/Delete to its LSM db
+                      └─▶ leader returns 204
+client PUT ──▶ follower ──▶ 421 Misdirected Request + Location: <leader addr>
+```
+
+Reads are served **locally** from each node's db: read-your-writes on the leader, eventually
+consistent on followers (as fresh as the last applied entry). This keeps the read path exactly as
+fast as the single-node engine. The LSM db is the replicated state machine — applying the same
+ordered log of Put/Delete commands on every node makes every node's contents converge.
+
+### Crash-safe Raft state (`raft/storage.go`)
+
+A node must never forget the term it has reached or the vote it granted, or it could vote twice in
+one term and elect two leaders. `FileStorage` persists the term, the vote and the log in one
+append-only file, framed with the **same CRC-32C records as the WAL and MANIFEST**: `crc (4 B) |
+len (4 B) | payload`, with the checksum covering the length so a corrupt length is caught too. A
+torn final record is truncated on recovery, exactly like the WAL. Every durable action (saving a
+vote, appending an entry) is fsynced before it is acted on, and a failed persist stops the node so
+a restart recovers from stable storage. A dedicated truncate record marks a pruned suffix so replay
+never resurrects overwritten entries.
+
+### Peer transport (`raft/transport_http.go`)
+
+Peers talk over a **separate internal listener** from the client KV API, so a client can never
+inject a `RequestVote`. RPCs are JSON over POST (`/raft/vote`, `/raft/append`), authenticated with
+a shared cluster secret sent as a hashed, constant-time-compared header. Put TLS in front of the
+peer plane in production.
+
+### Running a 3-node cluster
+
+Each node needs its own data directory, a client API address, an internal raft address, and the
+peer list. Set these per node:
+
+| Env var | Meaning | Example |
+|---|---|---|
+| `LSM_NODE_ID` | this node's ID (enables cluster mode) | `n1` |
+| `LSM_RAFT_ADDR` | internal listen address for peer RPCs | `:9001` |
+| `LSM_PEERS` | the OTHER nodes as `id=url,id=url` | `n2=http://10.0.0.2:9001,n3=http://10.0.0.3:9001` |
+| `LSM_CLUSTER_SECRET` | shared secret for peer RPCs (16+ bytes) | a random string |
+| `LSM_AUTH_TOKEN` | client bearer token (as before) | a random string |
+| `LSM_ADDR` | client API address (as before) | `:8080` |
+| `LSM_DATA_DIR` | per-node data directory | `./data-n1` |
+
+```powershell
+# node 1 (repeat for n2, n3 with their own IDs, addresses and data dirs)
+$env:LSM_AUTH_TOKEN      = "change-me-long-random"
+$env:LSM_CLUSTER_SECRET  = "change-me-cluster-secret"
+$env:LSM_NODE_ID         = "n1"
+$env:LSM_ADDR            = "127.0.0.1:8101"
+$env:LSM_RAFT_ADDR       = "127.0.0.1:9101"
+$env:LSM_PEERS           = "n2=http://127.0.0.1:9102,n3=http://127.0.0.1:9103"
+$env:LSM_DATA_DIR        = "./data-n1"
+go run ./cmd/lsmserver
+```
+
+```bash
+TOKEN=change-me-long-random
+# Find the leader and write to it; a follower answers 421 with the leader address.
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8101/v1/cluster
+curl -X PUT -H "Authorization: Bearer $TOKEN" --data 'london' http://127.0.0.1:8101/v1/kv/city
+# The value is now readable on every node (replicated through Raft):
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8103/v1/kv/city   # london
+```
+
+`GET /v1/cluster` (owner token) returns the node's role, term, leader, commit index and member
+count. The landing page shows this as a **live cluster topology** that updates as the role and
+leader change.
+
+### What is and is not covered
+
+Covered: leader election, log replication, the commit rules, crash-safe persistent state, follower
+log repair, leader failover, and linearizable writes (acknowledged only after a majority commit).
+Deliberately out of scope for this phase (listed under "Next"): dynamic membership changes, log
+compaction / snapshots (the raft log grows unbounded for now), and pre-vote.
+
 ## Roadmap details
 
 - Stretch: leveled compaction (flag-switchable), a public snapshots API, LRU block cache, block
   compression, Prometheus metrics.
-- Phase 2: Raft replication (own implementation) to turn this into a distributed KV store.
+- Next (post-Phase 2): dynamic cluster membership, Raft log compaction + snapshots, pre-vote to
+  avoid term inflation on a partitioned node.
 
 ## Layout
 
@@ -462,13 +572,15 @@ db/             public API (Open, Put, Get, Delete, Scan, Flush, Compact, Stats)
 memtable/       skip-list memtable + iterator
 internal/base/  internal keys (user key + seq number + kind) and ordering
 wal/            write-ahead log: framing, group commit, recovery
-server/         HTTP API: auth, limits, error mapping, demo sandbox, rate limiter
-server/web/     embedded landing page (HTML, CSS, JS)
-cmd/lsmserver/  server binary: config, timeouts, graceful shutdown
+server/         HTTP API: auth, limits, error mapping, demo sandbox, rate limiter, cluster routing
+server/web/     embedded landing page (HTML, CSS, JS) incl. live cluster topology
+cmd/lsmserver/  server binary: config, timeouts, graceful shutdown, cluster wiring
 sstable/        SSTable writer and reader: blocks, sparse index, filter, footer
 bloom/          bloom filters (optimal m/k, double hashing)
 manifest/       version-edit log of live SSTables
 compaction/     k-way merging iterator, drop rules, size-tiered picker
+raft/           Raft consensus: log, crash-safe storage, elections, replication, HTTP transport
+cluster/        wires a raft.Node to a db.DB: the replicated state machine and leader-only writes
 bench/          benchmark harness
 cmd/lsmbench/   benchmark binary
 ```
@@ -532,6 +644,15 @@ The test suite covers:
   proxy-aware client IPs, and the bounded limiter table failing closed.
 - Landing page and `/stats.json`: render without auth, never contain keys, values or the token,
   and carry the expected security headers.
+- Raft: single-node and 3-node leader election, log replication converging on all nodes, delete
+  replication, leader failover (partition the leader, a new one is elected and the old one steps
+  down on heal), followers rejecting proposals, and `FileStorage` recovering term/vote/log across a
+  restart including a truncated (conflicting) suffix. An HTTP-transport test runs a real 3-node
+  loopback cluster that replicates 20 keys and converges, and rejects a bad cluster secret. All run
+  under the race detector.
+- Cluster: a 3-node db-backed cluster over HTTP replicates writes and deletes into every node's LSM
+  db, a follower's write returns `ErrNotLeader`, and the cluster survives the loss of its leader
+  (a new leader is elected and pre-crash data is still readable).
 
 CI (GitHub Actions) runs `gofmt`, `go vet`, and `go test -race` on every push and pull request,
 then builds the Docker image and smoke-tests it (auth, write, container restart, read back).
